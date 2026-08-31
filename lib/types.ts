@@ -29,6 +29,8 @@ export type Piece = {
   color: string;
   /** Horizontal mirror — faces the opposite isometric direction. */
   flip: boolean;
+  /** Yaw in quarter turns of degrees (0|90|180|270) — which way the piece faces. */
+  rot?: number;
   bornAt: number;
 };
 

@@ -66,90 +66,120 @@ textarea {
   color: var(--ink);
 }
 
-/* Notch — Dynamic-Island-style status pill, click to expand ------------- */
+/* Notch — quiet session chip, click to expand into a short card -------- */
 
-.notch-wrap {
+.notch-anchor {
   position: absolute;
   top: 22px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 7;
+}
+
+.notch-wrap {
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: stretch;
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 20px;
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.05),
+    0 1px 0 rgba(255, 255, 255, 1) inset;
+}
+
+.notch-wrap:hover {
+  box-shadow:
+    0 10px 28px rgba(0, 0, 0, 0.08),
+    0 1px 0 rgba(255, 255, 255, 1) inset;
+}
+
+.notch-wrap[data-busy] {
+  box-shadow:
+    0 8px 24px rgba(91, 110, 245, 0.12),
+    0 1px 0 rgba(255, 255, 255, 1) inset;
+}
+
+.notch-wrap[data-expanded] {
+  width: min(78vw, 280px);
+  border-radius: 18px;
+  box-shadow:
+    0 16px 40px rgba(0, 0, 0, 0.1),
+    0 1px 0 rgba(255, 255, 255, 1) inset;
+}
+
+.notch-wrap[data-expanded]:hover {
+  box-shadow:
+    0 16px 40px rgba(0, 0, 0, 0.1),
+    0 1px 0 rgba(255, 255, 255, 1) inset;
 }
 
 .notch {
   appearance: none;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  background: #ffffff;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
   border-radius: 20px;
-  padding: 9px 18px;
+  padding: 8px 16px;
   cursor: pointer;
-  box-shadow:
-    0 10px 32px rgba(0, 0, 0, 0.06),
-    0 1px 0 rgba(255, 255, 255, 1) inset;
   color: var(--ink);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 3px;
-  transition:
-    border-radius 260ms var(--ease-spring),
-    box-shadow 200ms var(--ease-out),
-    transform 120ms var(--ease-out);
+  gap: 2px;
 }
 
-.notch:hover {
-  box-shadow:
-    0 12px 36px rgba(0, 0, 0, 0.09),
-    0 1px 0 rgba(255, 255, 255, 1) inset;
-}
-
-.notch:active {
-  transform: scale(0.985);
-}
-
-.notch[data-expanded] {
-  border-radius: 16px 16px 6px 6px;
-}
-
-.notch[data-busy] {
-  box-shadow:
-    0 10px 32px rgba(91, 110, 245, 0.14),
-    0 1px 0 rgba(255, 255, 255, 1) inset;
+.notch-wrap[data-expanded] .notch {
+  width: 100%;
+  align-items: flex-start;
+  padding: 12px 16px 4px;
 }
 
 .notch-row {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   font-size: 13px;
   font-weight: 580;
   letter-spacing: -0.01em;
   white-space: nowrap;
 }
 
+.notch-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #d0d0d0;
+  flex-shrink: 0;
+}
+
+.notch-dot[data-busy] {
+  background: #5b6ef5;
+  box-shadow: 0 0 0 3px rgba(91, 110, 245, 0.16);
+  animation: notch-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes notch-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px rgba(91, 110, 245, 0.16);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(91, 110, 245, 0.08);
+  }
+}
+
 .notch-mark {
   color: var(--ink);
 }
 
-.notch-sep {
-  color: #c8c8c8;
-  font-weight: 400;
-}
-
 .notch-status {
-  color: var(--muted);
+  color: #5b6ef5;
   font-weight: 500;
 }
 
-.notch[data-busy] .notch-status {
-  color: #5b6ef5;
-}
-
 .notch-live {
-  max-width: min(60vw, 380px);
+  max-width: min(56vw, 240px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -170,16 +200,9 @@ textarea {
 }
 
 .notch-panel {
-  width: min(84vw, 340px);
-  margin-top: -1px;
-  padding: 12px 16px 14px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-top: none;
-  border-radius: 0 0 16px 16px;
-  background: #ffffff;
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.1);
-  animation: notch-panel-in 200ms var(--ease-out);
+  padding: 2px 16px 14px;
   text-align: left;
+  animation: notch-panel-in 200ms var(--ease-out);
 }
 
 @keyframes notch-panel-in {
@@ -193,62 +216,37 @@ textarea {
   }
 }
 
-.notch-facts {
-  margin: 0 0 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.notch-facts dt {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-.notch-facts dd {
-  margin: 1px 0 0;
-  font-size: 12px;
+.notch-goal {
+  margin: 0 0 2px;
+  font-size: 13px;
+  font-weight: 580;
+  letter-spacing: -0.01em;
+  line-height: 1.35;
   color: var(--ink);
-  line-height: 1.4;
 }
 
-.notch-story-btn {
-  width: 100%;
-  border: 0;
-  border-radius: 10px;
-  background: var(--ink);
-  color: var(--paper);
-  padding: 8px 12px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-}
-
-.notch-story-btn:hover {
-  opacity: 0.92;
+.notch-count {
+  margin: 0 0 10px;
+  font-size: 11px;
+  color: var(--muted);
 }
 
 .notch-story {
   border-top: 1px solid var(--line);
   padding-top: 10px;
-  margin-top: 2px;
-}
-
-.notch-story__title {
-  margin: 0 0 6px;
-  font-size: 12px;
-  font-weight: 650;
-  color: var(--ink);
+  max-height: min(32vh, 220px);
+  overflow-y: auto;
 }
 
 .notch-story p {
   margin: 0 0 8px;
   font-size: 12px;
-  line-height: 1.55;
-  color: #333;
+  line-height: 1.5;
+  color: #555;
+}
+
+.notch-story p:last-child {
+  margin-bottom: 0;
 }
 
 .studio-tools {
@@ -284,18 +282,6 @@ textarea {
 .studio-error {
   margin-top: 6px;
   color: #3a3a3a;
-}
-
-.studio-intent {
-  position: absolute;
-  right: 88px;
-  bottom: 22px;
-  max-width: 260px;
-  text-align: right;
-  font-size: 12px;
-  line-height: 1.45;
-  color: #6e6e6e;
-  z-index: 5;
 }
 
 .studio-hint {
@@ -642,8 +628,13 @@ textarea {
   color: var(--ink);
 }
 
-.panel-body {
-  padding: 14px;
+.panel--nudge {
+  width: 300px;
+  border: 0;
+  border-radius: 20px;
+  background: var(--paper);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.12);
+  backdrop-filter: none;
 }
 
 .scroll {
@@ -684,70 +675,76 @@ textarea {
   stroke-width: 0.2;
 }
 
-/* Inspector ------------------------------------------------------------- */
+/* Inspector — compact selection pill ----------------------------------- */
+
+.studio:has(.inspector) .studio-hint {
+  opacity: 0;
+}
 
 .inspector {
   position: absolute;
   left: 50%;
-  bottom: 52px;
+  bottom: 22px;
   transform: translateX(-50%);
   z-index: 6;
-  width: 280px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.08);
-  backdrop-filter: blur(12px);
-  padding: 10px 12px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: max-content;
+  max-width: min(78vw, 340px);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 20px;
+  background: #ffffff;
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.05),
+    0 1px 0 rgba(255, 255, 255, 1) inset;
+  padding: 5px 6px 5px 14px;
   animation: panel-in 280ms var(--ease-out);
 }
 
-.inspector-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 6px;
+.inspector-name {
+  font-size: 13px;
+  font-weight: 580;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
-.inspector-title {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-}
-
-.inspector-row {
+.inspector-actions {
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-bottom: 8px;
+  flex-shrink: 0;
+  padding-left: 6px;
+  border-left: 1px solid var(--line);
 }
 
-.inspector-flip {
-  min-width: 48px;
-  text-align: center;
-  font-size: 11px;
-  font-weight: 600;
+.inspector-btn {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
   color: var(--ink);
+  cursor: pointer;
 }
 
-.inspector-row .rail-btn[aria-pressed="true"] {
+.inspector-btn:hover {
+  background: var(--soft);
+}
+
+.inspector-btn[aria-pressed="true"] {
   background: rgba(10, 10, 10, 0.08);
 }
 
-.inspector-label {
-  width: 100%;
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  padding: 7px 10px;
-  background: var(--paper);
-  color: var(--ink);
-  font-size: 12px;
-  outline: none;
-}
-
-.inspector-label:focus {
-  border-color: var(--ink);
+.inspector-btn[aria-label="Delete piece"]:hover {
+  background: #f4e8e8;
+  color: #b42318;
 }
 
 /* Isometric stage ------------------------------------------------------- */
@@ -894,25 +891,34 @@ textarea {
 /* Nudge ----------------------------------------------------------------- */
 
 .nudge {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px 14px 14px;
+  padding: 22px 22px 18px;
 }
 
-.nudge-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+.nudge-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+}
+
+.nudge-title {
+  margin: 0 28px 14px 0;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+  color: var(--ink);
 }
 
 .nudge-field {
   width: 100%;
   resize: none;
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  padding: 10px 12px;
-  background: var(--paper);
+  border: 0;
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: var(--soft);
   color: var(--ink);
   font-size: 13px;
   line-height: 1.45;
@@ -920,7 +926,7 @@ textarea {
 }
 
 .nudge-field:focus {
-  border-color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
 }
 
 .nudge-bar {
@@ -928,6 +934,7 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  margin-top: 14px;
 }
 
 .nudge-count {
@@ -941,27 +948,12 @@ textarea {
   gap: 6px;
 }
 
-.nudge-surprise {
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--ink);
-  padding: 4px 12px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-}
-
-.nudge-surprise:hover {
-  border-color: var(--ink);
-}
-
 .nudge-save {
   border: 0;
   border-radius: 999px;
   background: var(--ink);
   color: var(--paper);
-  padding: 5px 14px;
+  padding: 7px 14px;
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
@@ -1058,8 +1050,7 @@ textarea {
   margin: 0 0 8px;
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: 0.04em;
   color: var(--muted);
 }
 
@@ -1133,4 +1124,54 @@ textarea {
     padding: 24px 24px 28px;
     justify-content: flex-start;
   }
+}
+
+/* 3D diorama stage ------------------------------------------------------ */
+
+.stage3d {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.stage3d canvas {
+  display: block;
+  outline: none;
+}
+
+/* Same cursor grammar as the 2D stage. */
+.stage3d.stage--pan,
+.stage3d.stage--move {
+  cursor: grab;
+}
+
+.stage3d.stage--pan:active,
+.stage3d.stage--moving {
+  cursor: grabbing;
+}
+
+/* Floating labels rendered via drei <Html> over the paper diorama. */
+.iso-tag3d {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: #3a4652;
+  text-shadow:
+    0 0 3px rgba(255, 255, 255, 0.9),
+    0 1px 2px rgba(255, 255, 255, 0.85);
+  white-space: nowrap;
+  user-select: none;
+  pointer-events: none;
+}
+
+.iso-debug3d {
+  font-size: 9px;
+  color: rgba(30, 40, 50, 0.55);
+  white-space: nowrap;
+  user-select: none;
+  pointer-events: none;
 }

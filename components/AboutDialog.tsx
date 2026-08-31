@@ -134,7 +134,7 @@ export function AboutDialog({ open, closing, onClose }: Props) {
           >
             <CloseIcon active />
           </button>
-          <p className="about-kicker">Together</p>
+          <p className="about-kicker">SharableWorlds</p>
           <h2 id="about-title" className="about-title">
             A shared lot map
           </h2>

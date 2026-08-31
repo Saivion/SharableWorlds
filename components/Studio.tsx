@@ -2,10 +2,11 @@
 
 import { useEffect, useState, type CSSProperties } from "react";
 import { runGoalBuild } from "@/lib/goalRunner";
+import { seedReferenceScene } from "@/lib/scenes/reference";
 import { callTownTool, registerTownTools, TOWN_TOOLS } from "@/lib/town";
 import { AGENT_ACCENT, useTown } from "@/lib/store";
 import type { ToolMode } from "@/lib/types";
-import { Stage } from "./Stage";
+import { Stage3D } from "./stage3d/Stage3D";
 import { AboutDialog, useAboutDialog } from "./AboutDialog";
 import { Rail } from "./Rail";
 import { Inspector } from "./Inspector";
@@ -20,7 +21,6 @@ export function Studio() {
   const webmcp = useTown((s) => s.webmcp);
   const setWebmcp = useTown((s) => s.setWebmcp);
   const lastError = useTown((s) => s.lastError);
-  const agentLastMove = useTown((s) => s.agentLastMove);
   const tool = useTown((s) => s.tool);
   const setTool = useTown((s) => s.setTool);
   const kitOpen = useTown((s) => s.kitOpen);
@@ -55,6 +55,11 @@ export function Studio() {
     if (nudgeToken === 0 || !nudgeGoal) return;
     void runGoalBuild(nudgeGoal);
   }, [nudgeToken, nudgeGoal]);
+
+  // First visit opens on the composed reference diorama, not an empty canvas.
+  useEffect(() => {
+    seedReferenceScene();
+  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -98,7 +103,7 @@ export function Studio() {
       className="studio"
       style={{ "--agent-accent": AGENT_ACCENT } as CSSProperties}
     >
-      <Stage />
+      <Stage3D />
 
       <Notch />
 
@@ -182,9 +187,6 @@ export function Studio() {
         {lastError && <div className="studio-error">{lastError}</div>}
       </footer>
 
-      <div className="studio-intent">
-        {agentLastMove ? `agent · ${agentLastMove}` : ""}
-      </div>
       <div className="studio-hint">
         Select to drag objects · F to flip toward each other · pick a piece, click anywhere · Space + drag to pan · scroll to zoom
       </div>

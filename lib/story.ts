@@ -464,6 +464,14 @@ function fallbackNoun(rawLabel: string, kind?: CatalogKind): string {
   return articleFor([...adjs, ...others].join(" ") || "piece");
 }
 
+/** Catalog id (or instance id with a trailing `-N`) → prose noun for live chips. */
+export function phraseForCatalog(id: string, kind?: CatalogKind): string {
+  const catalogId = id.replace(/-\d+$/, "");
+  if (NOUN_OVERRIDES[catalogId]) return NOUN_OVERRIDES[catalogId];
+  if (kind === "character") return "a character";
+  return fallbackNoun(catalogId.split("-").slice(1).join(" ") || catalogId, kind);
+}
+
 const COLOR_NAMES: Record<string, string> = {
   "#ff005c": "hot pink",
   "#4db8ff": "sky blue",

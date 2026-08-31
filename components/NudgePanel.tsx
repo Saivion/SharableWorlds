@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { pickSurpriseGoal } from "@/lib/surpriseGoals";
 import { NUDGE_MAX_CHARS, useTown } from "@/lib/store";
 import { CloseIcon } from "./icons";
@@ -19,6 +19,19 @@ export function NudgePanel({ onCommitted, onClose }: Props) {
   const goal = useTown((s) => s.nudgeGoal);
   const setNudgeGoal = useTown((s) => s.setNudgeGoal);
   const [draft, setDraft] = useState(goal ?? "");
+  const fieldRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    fieldRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose?.();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   function commit(value: string) {
     // Close first — a blur-triggered re-render must not swallow the click.
@@ -34,13 +47,14 @@ export function NudgePanel({ onCommitted, onClose }: Props) {
 
   return (
     <div className="nudge">
-      <div className="nudge-top">
-        <span className="panel-title">Nudge</span>
-        <button type="button" aria-label="Close panel" className="panel-close" onClick={onClose}>
-          <CloseIcon active />
-        </button>
-      </div>
+      <button type="button" className="panel-close nudge-close" aria-label="Close" onClick={onClose}>
+        <CloseIcon active />
+      </button>
+
+      <h2 className="nudge-title">Give it a goal</h2>
+
       <textarea
+        ref={fieldRef}
         className="nudge-field"
         value={draft}
         maxLength={NUDGE_MAX_CHARS}
@@ -54,12 +68,10 @@ export function NudgePanel({ onCommitted, onClose }: Props) {
           }
         }}
       />
+
       <div className="nudge-bar">
         <span className="nudge-count">
-          {draft.trim().length}/{NUDGE_MAX_CHARS}
-        </span>
-        <div className="nudge-actions">
-          {goal && (
+          {goal ? (
             <button
               type="button"
               className="text-link"
@@ -71,10 +83,14 @@ export function NudgePanel({ onCommitted, onClose }: Props) {
             >
               Clear
             </button>
+          ) : (
+            `${draft.trim().length}/${NUDGE_MAX_CHARS}`
           )}
+        </span>
+        <div className="nudge-actions">
           <button
             type="button"
-            className="nudge-surprise"
+            className="nudge-save"
             onPointerDown={(e) => e.preventDefault()}
             onClick={surprise}
           >

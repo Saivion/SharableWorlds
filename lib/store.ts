@@ -1,6 +1,7 @@
 "use client";
 
 import { create } from "zustand";
+import type { EnvironmentSpec } from "./composition/types";
 import type { Piece, StoryEvent, ToolMode } from "./types";
 import { LABEL_MAX_CHARS } from "./types";
 
@@ -21,6 +22,12 @@ export type UndoEntry =
 export type TownStore = {
   /** All pieces by id. Occupancy is derived from this — one lot, one piece. */
   pieces: Record<string, Piece>;
+  /**
+   * The authored architecture under the pieces: platforms, walls, stairs,
+   * paths, water, zones. Set by scene plans (and the reference scene); null
+   * means freeform — the stage derives ground pads under whatever exists.
+   */
+  environment: EnvironmentSpec | null;
   /** Per-catalog-item id counters — instance ids stay stable, never reused. */
   counters: Record<string, number>;
   /** Human's current selection (piece ids). */
@@ -61,6 +68,7 @@ export type TownStore = {
   webmcp: "pending" | "available" | "missing";
   lastError: string | null;
 
+  setEnvironment: (env: EnvironmentSpec | null) => void;
   addPiece: (piece: Piece) => void;
   deletePiece: (id: string) => void;
   patchPiece: (id: string, patch: Partial<Piece>) => void;
@@ -93,6 +101,7 @@ export function clampLabel(text: string) {
 
 export const useTown = create<TownStore>((set, get) => ({
   pieces: {},
+  environment: null,
   counters: {},
   selection: [],
   humanActions: [],
@@ -114,6 +123,7 @@ export const useTown = create<TownStore>((set, get) => ({
   webmcp: "pending",
   lastError: null,
 
+  setEnvironment: (environment) => set({ environment }),
   addPiece: (piece) =>
     set((state) => ({
       pieces: {
@@ -179,6 +189,7 @@ export const useTown = create<TownStore>((set, get) => ({
       ].slice(-EVENTS_MAX);
       return {
         pieces: {},
+        environment: null,
         counters: {},
         selection: [],
         undoStack: [],

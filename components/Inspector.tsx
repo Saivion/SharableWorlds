@@ -1,64 +1,38 @@
 "use client";
 
-import { useState } from "react";
+import { catalogItem } from "@/lib/catalog";
+import { phraseForCatalog } from "@/lib/story";
 import { useTown } from "@/lib/store";
-import { humanFlip, humanLabel, humanRemove } from "@/lib/town";
-import { LABEL_MAX_CHARS } from "@/lib/types";
-import { CloseIcon, FlipIcon, TrashIcon } from "./icons";
+import { humanFlip, humanRemove } from "@/lib/town";
+import { FlipIcon, TrashIcon } from "./icons";
 
-/** Human-only controls for the selected piece: flip, label, delete. */
+/** Compact selection bar: what this is, flip, delete. No naming. */
 export function Inspector() {
   const pieces = useTown((s) => s.pieces);
   const selection = useTown((s) => s.selection);
-  const setSelection = useTown((s) => s.setSelection);
   const piece = selection.length === 1 ? pieces[selection[0]] : undefined;
-  const [draft, setDraft] = useState("");
-  const [editingId, setEditingId] = useState<string | null>(null);
-
-  // Reset the draft when the selection moves to a different piece.
-  if (piece && editingId !== piece.id) {
-    setEditingId(piece.id);
-    setDraft(piece.label);
-  }
 
   if (!piece) return null;
 
-  function commitLabel() {
-    if (!piece || draft === piece.label) return;
-    humanLabel(piece.id, draft);
-  }
+  const name = titleFor(piece.catalogId, piece.kind);
 
   return (
     <div className="inspector" data-testid="inspector">
-      <div className="inspector-head">
-        <span className="inspector-title">
-          {piece.id} · {piece.lot} · {piece.owner}
-          {piece.locked ? " · locked" : ""}
-        </span>
+      <span className="inspector-name">{name}</span>
+      <div className="inspector-actions">
         <button
           type="button"
-          className="panel-close"
-          aria-label="Deselect"
-          onClick={() => setSelection([])}
-        >
-          <CloseIcon active />
-        </button>
-      </div>
-      <div className="inspector-row">
-        <button
-          type="button"
-          className="rail-btn tip"
-          data-tip="Flip horizontally"
+          className="inspector-btn tip"
+          data-tip={piece.flip ? "Flipped — click to face the other way" : "Flip horizontally"}
           aria-label="Flip horizontally"
           aria-pressed={Boolean(piece.flip)}
           onClick={() => humanFlip(piece.id)}
         >
           <FlipIcon />
         </button>
-        <span className="inspector-flip">{piece.flip ? "Flipped" : "Front"}</span>
         <button
           type="button"
-          className="rail-btn tip"
+          className="inspector-btn tip"
           data-tip="Delete"
           aria-label="Delete piece"
           onClick={() => humanRemove(piece.id)}
@@ -66,21 +40,12 @@ export function Inspector() {
           <TrashIcon />
         </button>
       </div>
-      <input
-        className="inspector-label"
-        value={draft}
-        maxLength={LABEL_MAX_CHARS}
-        placeholder="Name this piece"
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commitLabel}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            e.preventDefault();
-            commitLabel();
-            (e.target as HTMLInputElement).blur();
-          }
-        }}
-      />
     </div>
   );
+}
+
+function titleFor(catalogId: string, kind: Parameters<typeof phraseForCatalog>[1]): string {
+  const phrase = phraseForCatalog(catalogId, kind);
+  const bare = phrase.replace(/^an? /, "");
+  return bare ? bare[0].toUpperCase() + bare.slice(1) : (catalogItem(catalogId)?.label ?? "Piece");
 }

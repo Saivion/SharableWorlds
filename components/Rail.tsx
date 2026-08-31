@@ -49,7 +49,7 @@ export function Rail({ aboutOpen = false, onAbout }: Props) {
   return (
     <div className="studio-aside">
       {nudgeOpen && (
-        <div className="panel panel--float" data-closing={closing || undefined}>
+        <div className="panel panel--float panel--nudge" data-closing={closing || undefined}>
           <NudgePanel onCommitted={closePanel} onClose={closePanel} />
         </div>
       )}

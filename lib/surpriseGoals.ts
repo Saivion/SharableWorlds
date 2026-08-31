@@ -22,6 +22,12 @@ export const SURPRISE_GOALS = [
   "a cave camp with a fire",
   "a survival homestead",
   "a garden with trees and crops",
+  "a west-facing marina at sunset",
+  "cars parked along a side street",
+  "a keep on the hill with a garden below",
+  "an indoor arcade opening onto a plaza",
+  "a desert island camp",
+  "a lakeside picnic with boats",
 ] as const;
 
 let lastSurprise = "";

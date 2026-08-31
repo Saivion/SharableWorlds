@@ -1,6 +1,7 @@
 "use client";
 
 import { isoOf } from "./iso";
+import { projectLot } from "./stageProjection";
 import { useTown } from "./store";
 import { parseLot } from "./town";
 
@@ -81,6 +82,10 @@ export function kitPalettePoint(): { x: number; y: number } | null {
 }
 
 export function lotScreenPoint(lot: string): { x: number; y: number } | null {
+  // The 3D stage registers a camera projector; the SVG CTM path below is the
+  // legacy fallback for the 2D sprite stage.
+  const projected = projectLot(lot);
+  if (projected) return projected;
   const parsed = parseLot(lot);
   const svg = document.querySelector<SVGSVGElement>("svg.stage");
   if (!parsed || !svg) return null;

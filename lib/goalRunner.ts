@@ -11,6 +11,7 @@ import {
 } from "./agentMotion";
 import { catalogItem } from "./catalog";
 import { useTown } from "./store";
+import { phraseForCatalog } from "./story";
 import { callTownTool } from "./town";
 
 /**
@@ -54,15 +55,27 @@ function coordLot(col: number, row: number): string {
 }
 
 const NUDGE_STEPS: [number, number][] = [
-  [1, 0], [0, 1], [-1, 0], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1],
+  [2, 0],
+  [0, 2],
+  [-2, 0],
+  [0, -2],
+  [2, 1],
+  [1, 2],
+  [-2, 1],
+  [1, -2],
+  [2, -1],
+  [-1, 2],
+  [-2, -1],
+  [-1, -2],
 ];
 
 /**
  * The look-it-over pass after a build: read the scene back and ask whether it
- * still holds together as one place. Any agent piece stranded more than two
- * cells from everything else gets walked in beside its nearest neighbor —
+ * still holds together as one place. Any agent piece stranded more than three
+ * cells from everything else gets walked in near its nearest neighbor —
  * collisions and human locks during placement can fling pieces wide, and this
- * is what tucks them back into the composition.
+ * is what tucks them back into the composition. Targets sit two cells out so
+ * we never collapse a tree into a log.
  */
 async function inspectAndRefine(id: number, gen: number): Promise<void> {
   const scene = parse(await callTownTool("get_scene"));
@@ -91,7 +104,9 @@ async function inspectAndRefine(id: number, gen: number): Promise<void> {
         nearest = other;
       }
     }
-    if (!nearest || best <= 2) continue;
+    if (!nearest || best <= 3) continue;
+    if (id !== runId || !isMotionCurrent(gen)) return;
+    useTown.getState().setAgentStatus("pulling a straggler in");
     for (const [dc, dr] of NUDGE_STEPS) {
       const lot = coordLot(nearest.at.col + dc, nearest.at.row + dr);
       if (occupied.has(lot)) continue;
@@ -101,13 +116,12 @@ async function inspectAndRefine(id: number, gen: number): Promise<void> {
       const res = parse(
         await callTownTool("move_piece", { id: piece.id, lot, intent: "pulling a straggler in" }),
       );
-      if (!res.error) {
-        occupied.delete(piece.lot);
-        occupied.add(lot);
-        piece.lot = lot;
-        piece.at = lotCoord(lot) ?? piece.at;
-        moved += 1;
-      }
+      if (res.error) continue;
+      occupied.delete(piece.lot);
+      occupied.add(lot);
+      piece.lot = lot;
+      piece.at = lotCoord(lot) ?? piece.at;
+      moved += 1;
       break;
     }
   }
@@ -123,7 +137,7 @@ export async function runGoalBuild(goal: string): Promise<void> {
   store.setAgentLoop(true);
   store.setAgentBusy(true);
   store.setKitOpen(true);
-  store.setAgentStatus(`Nudge: ${goal}`);
+  store.setAgentStatus(`building ${goal}`);
   await sleep(300, gen);
   const kitHome = kitPalettePoint() ?? { x: 160, y: window.innerHeight * 0.38 };
   store.setAgentCursor({
@@ -137,19 +151,24 @@ export async function runGoalBuild(goal: string): Promise<void> {
     if (id !== runId || !isMotionCurrent(gen)) return;
     const plan = parse(await callTownTool("plan_scene", { theme: goal }));
     if (id !== runId || !isMotionCurrent(gen)) return;
-    const todos = (plan.todos ?? []) as { place: string; lot: string; flip?: boolean; reason?: string }[];
+    const todos = (plan.todos ?? []) as { place: string; lot: string; flip?: boolean; rot?: number; reason?: string }[];
     if (!todos.length) {
       store.setAgentStatus("Nudge set — nothing to place for that goal");
       return;
     }
     const locks = Array.isArray(occ.human_locks) ? occ.human_locks.length : 0;
+    store.setAgentStatus("laying the ground");
+    await sleep(1600, gen);
+    if (id !== runId || !isMotionCurrent(gen)) return;
     store.setAgentStatus(locks ? `building ${goal} around yours` : `building ${goal}`);
 
     let lastGrab: string | null = null;
     for (const todo of todos) {
       if (id !== runId || !isMotionCurrent(gen)) return;
       const item = catalogItem(todo.place);
-      const label = item?.label ?? todo.place;
+      const label = item ? phraseForCatalog(item.id, item.kind) : todo.place;
+      // Chip first, then motion — otherwise the line lags the cursor by a whole hop.
+      useTown.getState().setAgentStatus(todo.reason ? `placing ${label} — ${todo.reason}` : `placing ${label}`);
 
       if (todo.place !== lastGrab) {
         useTown.getState().setKitOpen(true);
@@ -173,6 +192,7 @@ export async function runGoalBuild(goal: string): Promise<void> {
         id: todo.place,
         lot: todo.lot,
         flip: Boolean(todo.flip),
+        ...(todo.rot ? { rot: todo.rot } : {}),
         intent: todo.reason ? `placing ${label} — ${todo.reason}` : `placing ${label}`,
         // Zone reason flows into the story log so the recap can narrate the
         // scene as a built place, zone by zone.
@@ -188,6 +208,7 @@ export async function runGoalBuild(goal: string): Promise<void> {
       const latest = useTown.getState();
       latest.setAgentLoop(false);
       latest.setAgentBusy(false);
+      latest.setAgentStatus(null);
       latest.setAgentGrabId(null);
       latest.setAgentGhost(null);
       latest.setAgentCursor(latest.agentCursor ? { ...latest.agentCursor, visible: false } : null);

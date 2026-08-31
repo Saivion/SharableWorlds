@@ -1,9 +1,12 @@
 "use client";
 
 import { CATALOG, catalogItem, defaultForKind, FEATURED, type CatalogItem } from "./catalog";
+import { clearanceLots } from "./composition/scale3d";
+import { platformAt, reservedLots } from "./composition/surface";
+import { rectContains } from "./composition/grid3d";
 import { snapLotCoord } from "./iso";
 import { clampLabel, useTown } from "./store";
-import { buildStory } from "./story";
+import { buildStory, phraseForCatalog } from "./story";
 import { planCompleteScene } from "./scenePlan";
 import type { Owner, Piece, Side } from "./types";
 import { isSide, SIDES } from "./types";
@@ -143,6 +146,60 @@ export function occupancyMap(): Map<string, Piece> {
   return map;
 }
 
+/**
+ * Another piece whose mesh would occupy the same floor as `item` on `lot`.
+ * Same-lot occupancy is a special case of this (distance 0).
+ */
+export function lotCollision(lot: string, item: CatalogItem, ignoreId?: string): Piece | null {
+  const at = parseLot(lot);
+  if (!at) return null;
+  const r = clearanceLots(item);
+  for (const piece of piecesList()) {
+    if (piece.id === ignoreId) continue;
+    const other = catalogItem(piece.catalogId);
+    if (!other) continue;
+    const otherAt = parseLot(piece.lot);
+    if (!otherAt) continue;
+    if (Math.hypot(at.col - otherAt.col, at.row - otherAt.row) < r + clearanceLots(other)) {
+      return piece;
+    }
+  }
+  return null;
+}
+
+function lotOnScene(lot: string): boolean {
+  const env = useTown.getState().environment;
+  if (!env) return true;
+  const at = parseLot(lot);
+  if (!at) return false;
+  if (platformAt(env, at.col, at.row)) return true;
+  return env.water.some((w) => rectContains(w.rect, at.col, at.row));
+}
+
+function searchClearLot(
+  from: { col: number; row: number },
+  item: CatalogItem,
+  occ: Map<string, Piece>,
+  ignoreId?: string,
+  ring = 8,
+): string | null {
+  const reserved = reservedLots(useTown.getState().environment);
+  for (let r = 0; r <= ring; r += 1) {
+    for (let dc = -r; dc <= r; dc += 1) {
+      for (let dr = -r; dr <= r; dr += 1) {
+        if (Math.max(Math.abs(dc), Math.abs(dr)) !== r) continue;
+        const lot = lotId(from.col + dc, from.row + dr);
+        if (occ.has(lot) && occ.get(lot)?.id !== ignoreId) continue;
+        if (reserved.has(lot)) continue;
+        if (!lotOnScene(lot)) continue;
+        if (lotCollision(lot, item, ignoreId)) continue;
+        return lot;
+      }
+    }
+  }
+  return null;
+}
+
 export function emptyLots(occ = occupancyMap()): string[] {
   return nearbyEmpties(occ, 24);
 }
@@ -168,26 +225,39 @@ const CENTER_LOTS = ["M13", "N13", "M14", "N14"];
  * adjacent to existing pieces, nearest the scene's centroid, so the scene
  * grows instead of scattering.
  */
-export function chooseAutoLot(occ = occupancyMap()): string | null {
+export function chooseAutoLot(occ = occupancyMap(), item?: CatalogItem, ignoreId?: string): string | null {
+  const reserved = reservedLots(useTown.getState().environment);
+  const open = (lot: string) =>
+    !occ.has(lot) && !reserved.has(lot) && (!item || !lotCollision(lot, item, ignoreId));
   if (occ.size === 0) {
-    return CENTER_LOTS.find((lot) => !occ.has(lot)) ?? null;
+    return CENTER_LOTS.find((lot) => open(lot)) ?? CENTER_LOTS[0] ?? null;
   }
   const seen = new Set<string>();
   const candidates: string[] = [];
   const occupied = [...occ.keys()];
   for (const lot of occupied) {
-    for (const gap of [2, 1]) {
+    for (const gap of [2, 3, 4, 1]) {
       for (const side of SIDE_ORDER) {
         const next = stepLot(lot, side, gap);
-        if (next && !occ.has(next) && !seen.has(next)) {
+        if (next && open(next) && !seen.has(next)) {
           seen.add(next);
           candidates.push(next);
         }
       }
     }
   }
-  const pool = candidates.length ? candidates : emptyLots(occ);
+  let pool = candidates.length ? candidates : emptyLots(occ).filter(open);
   if (!pool.length) return null;
+  // When the scene has authored architecture, auto-growth stays ON it — the
+  // agent should fill the place it was given, not sprawl into the void.
+  const env = useTown.getState().environment;
+  if (env) {
+    const onDeck = pool.filter((lot) => {
+      const p = parseLot(lot);
+      return p != null && platformAt(env, p.col, p.row) != null;
+    });
+    if (onDeck.length) pool = onDeck;
+  }
   const center = centroidOf(occupied);
   let best = pool[0];
   let bestDist = Infinity;
@@ -212,11 +282,20 @@ const RESULT_BUDGET = 1400;
 export function occupancySnapshot() {
   const state = useTown.getState();
   const occ = occupancyMap();
+  const env = state.environment;
   return {
     grid: { infinite: true },
     catalog_pieces: CATALOG.length,
     catalog_packs: FEATURED.length,
     goal: state.nudgeGoal,
+    // Compact zone map when architecture exists — "id:type@ColRow WxD".
+    ...(env?.zones.length
+      ? {
+          zones: env.zones.map(
+            (z) => `${z.id}:${z.type}@${lotId(z.rect.c0, z.rect.r0)} ${z.rect.w}x${z.rect.d}${z.level ? ` up${z.level}` : ""}`,
+          ),
+        }
+      : {}),
     filled: [...occ.entries()].map(([lot, p]) => `${lot}:${p.id}:${p.owner}`),
     empty: nearbyEmpties(occ, 24),
     human_locks: humanLockLots(occ),
@@ -264,9 +343,9 @@ function fail(why: string, extra: Record<string, unknown> = {}): ModelContextToo
 }
 
 /** Recovery hint for a refused write: who is in the way, where is free. */
-function occupiedHint(lot: string, occ = occupancyMap()) {
+function occupiedHint(lot: string, occ = occupancyMap(), item?: CatalogItem) {
   const holder = occ.get(lot);
-  const empties = nearestEmpties(lot, occ, 4);
+  const empties = nearestEmpties(lot, occ, 4, item);
   return {
     error: holder
       ? `Lot ${lot} occupied by ${holder.id} (${holder.owner}${holder.locked ? ", locked" : ""}).`
@@ -275,9 +354,10 @@ function occupiedHint(lot: string, occ = occupancyMap()) {
   };
 }
 
-function nearestEmpties(fromLot: string, occ = occupancyMap(), count = 4): string[] {
+function nearestEmpties(fromLot: string, occ = occupancyMap(), count = 4, item?: CatalogItem): string[] {
   const from = lotCenter(fromLot);
   return emptyLots(occ)
+    .filter((lot) => !item || !lotCollision(lot, item))
     .map((lot) => {
       const p = lotCenter(lot);
       return { lot, d: (p.x - from.x) ** 2 + (p.y - from.y) ** 2 };
@@ -321,9 +401,19 @@ export type PlaceSpec = {
   side?: Side;
   gap?: number;
   flip?: boolean;
+  /** Yaw in quarter turns of degrees (0|90|180|270) — which way the piece faces. */
+  rot?: number;
   /** The planner's zone reason ("the centerpiece"), carried into the story log. */
   reason?: string;
 };
+
+/** Valid quarter-turn rotations; anything else is normalized to the nearest. */
+export function clampRot(value: unknown): number | undefined {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return undefined;
+  const snapped = ((Math.round(n / 90) * 90) % 360 + 360) % 360;
+  return snapped === 0 ? undefined : snapped;
+}
 
 export type PlaceOutcome =
   | { ok: true; piece: Piece }
@@ -331,11 +421,13 @@ export type PlaceOutcome =
 
 /**
  * Place one catalog object. The page picks and validates the cell; raw x,y
- * never enters this function. Refuses occupied lots, never touches locked ones.
+ * never enters this function. Refuses occupied lots, overlapping footprints,
+ * and never touches locked ones.
  */
 export function placePiece(spec: PlaceSpec, owner: Owner): PlaceOutcome {
   const occ = occupancyMap();
   let lot: string | null = null;
+  const reserved = reservedLots(useTown.getState().environment);
 
   if (spec.lot != null) {
     const parsed = parseLot(spec.lot);
@@ -343,30 +435,90 @@ export function placePiece(spec: PlaceSpec, owner: Owner): PlaceOutcome {
       return { ok: false, why: `"${String(spec.lot)}" is not a lot. Use A1-style ids (C4, M13).` };
     }
     lot = lotId(parsed.col, parsed.row);
+    const holder = occ.get(lot);
+    if (holder) {
+      const hint = occupiedHint(lot, occ, spec.item);
+      return { ok: false, why: hint.error, empty_nearby: hint.empty_nearby, lot };
+    }
+    if (reserved.has(lot)) {
+      return {
+        ok: false,
+        why: `Lot ${lot} holds the stairs — nothing can stand there.`,
+        empty_nearby: nearestEmpties(lot, occ, 4, spec.item),
+        lot,
+      };
+    }
+    const blocker = lotCollision(lot, spec.item);
+    if (blocker) {
+      if (owner === "human") {
+        return {
+          ok: false,
+          why: `Too close to ${blocker.id} — pick a clearer spot.`,
+          empty_nearby: nearestEmpties(lot, occ, 4, spec.item),
+          lot,
+        };
+      }
+      const alt = searchClearLot(parsed, spec.item, occ);
+      if (!alt) {
+        return {
+          ok: false,
+          why: `Too close to ${blocker.id}.`,
+          empty_nearby: nearestEmpties(lot, occ, 4, spec.item),
+          lot,
+        };
+      }
+      lot = alt;
+    }
   } else if (spec.relativeTo != null) {
     const anchor = useTown.getState().pieces[String(spec.relativeTo).trim()];
     if (!anchor) {
       return { ok: false, why: `No piece "${String(spec.relativeTo)}". Use ids from get_occupancy.` };
     }
     const side = spec.side ?? "east";
-    const gap = Math.min(8, Math.max(0.5, Math.round(Number(spec.gap ?? 1) * 2) / 2 || 1));
+    let gap = Math.min(8, Math.max(0.5, Math.round(Number(spec.gap ?? 1) * 2) / 2 || 1));
     lot = stepLot(anchor.lot, side, gap);
+    while (lot && (occ.has(lot) || reserved.has(lot) || lotCollision(lot, spec.item))) {
+      gap += 1;
+      if (gap > 8) {
+        const at = parseLot(anchor.lot);
+        lot = at ? searchClearLot(at, spec.item, occ) : null;
+        break;
+      }
+      lot = stepLot(anchor.lot, side, gap);
+    }
     if (!lot) {
       return {
         ok: false,
-        why: `${side} of ${anchor.id} (${anchor.lot}) is off-grid.`,
-        empty_nearby: nearestEmpties(anchor.lot, occ),
+        why: `${side} of ${anchor.id} (${anchor.lot}) has no clear lot.`,
+        empty_nearby: nearestEmpties(anchor.lot, occ, 4, spec.item),
       };
     }
   } else {
-    lot = chooseAutoLot(occ);
-    if (!lot) return { ok: false, why: "No empty lots left." };
+    lot = chooseAutoLot(occ, spec.item);
+    if (!lot) return { ok: false, why: "No empty lots left that fit this piece." };
   }
 
   const holder = occ.get(lot);
   if (holder) {
-    const hint = occupiedHint(lot, occ);
+    const hint = occupiedHint(lot, occ, spec.item);
     return { ok: false, why: hint.error, empty_nearby: hint.empty_nearby, lot };
+  }
+  if (reserved.has(lot)) {
+    return {
+      ok: false,
+      why: `Lot ${lot} holds the stairs — nothing can stand there.`,
+      empty_nearby: nearestEmpties(lot, occ, 4, spec.item),
+      lot,
+    };
+  }
+  const blocker = lotCollision(lot, spec.item);
+  if (blocker) {
+    return {
+      ok: false,
+      why: `Too close to ${blocker.id}.`,
+      empty_nearby: nearestEmpties(lot, occ, 4, spec.item),
+      lot,
+    };
   }
 
   const store = useTown.getState();
@@ -381,6 +533,7 @@ export function placePiece(spec: PlaceSpec, owner: Owner): PlaceOutcome {
     label: "",
     color: "",
     flip: Boolean(spec.flip),
+    ...(spec.rot ? { rot: spec.rot } : {}),
     bornAt: Date.now(),
   };
   store.addPiece(piece);
@@ -422,6 +575,14 @@ export function humanMove(id: string, lot: string): PlaceOutcome {
   const holder = occupancyMap().get(target);
   if (holder && holder.id !== piece.id) {
     return { ok: false, why: `Lot ${target} is occupied by ${holder.id}.` };
+  }
+  if (reservedLots(store.environment).has(target)) {
+    return { ok: false, why: `Lot ${target} holds the stairs.` };
+  }
+  const item = catalogItem(piece.catalogId);
+  if (item) {
+    const blocker = lotCollision(target, item, piece.id);
+    if (blocker) return { ok: false, why: `Too close to ${blocker.id} — pick a clearer spot.` };
   }
   store.pushUndo({ t: "move", id, prevLot: piece.lot });
   store.patchPiece(id, { lot: target });
@@ -514,6 +675,7 @@ function parsePlaceSpec(input: Record<string, unknown>): PlaceSpec | { error: st
   }
   if (input.gap != null) spec.gap = Number(input.gap);
   if (input.flip != null) spec.flip = Boolean(input.flip);
+  if (input.rot != null) spec.rot = clampRot(input.rot);
   if (input.reason != null) spec.reason = String(input.reason).slice(0, 60);
   return spec;
 }
@@ -522,7 +684,7 @@ function agentPlaceOne(spec: PlaceSpec): PlaceOutcome {
   const outcome = placePiece(spec, "agent");
   if (outcome.ok) {
     const store = useTown.getState();
-    store.setAgentLastMove(`placed ${outcome.piece.id} on ${outcome.piece.lot}`);
+    store.setAgentLastMove(`placed ${phraseForCatalog(outcome.piece.catalogId, outcome.piece.kind)}`);
     store.pushEvent({
       actor: "agent",
       verb: "place",
@@ -546,20 +708,28 @@ function chipText(value: unknown): string | null {
   return text.length ? text : null;
 }
 
-/** Show the model's stated intent on the canvas the moment a write starts. */
+/** Show the model's stated intent on the canvas the moment a write starts.
+ * During a local Nudge loop the runner owns the chip (it sets the line before
+ * travel so the text matches the cursor), so skip the status write here. */
 function beginWrite(intent: string | null, ghost: { lot: string; catalogId: string } | null) {
   const store = useTown.getState();
-  if (intent) store.setAgentStatus(intent);
+  if (intent && !store.agentLoop) store.setAgentStatus(intent);
   store.setAgentGhost(ghost);
   store.setAgentBusy(true);
 }
 
-/** Swap the chip to what actually happened; drop the ghost. */
-function endWrite(noticed: string | null) {
+/** Swap the chip to what actually happened; drop the ghost. Canvas-facing — never a catalog id. */
+function endWrite(chip: string | null) {
   const store = useTown.getState();
-  if (noticed) store.setAgentStatus(noticed);
+  // During a multi-piece loop the in-flight intent ("placing a stump") is the
+  // better live line; don't flash "placed …" after every write.
+  if (chip && !store.agentLoop) store.setAgentStatus(chip);
   store.setAgentGhost(null);
   if (!store.agentLoop) store.setAgentBusy(false);
+}
+
+function chipPlace(piece: { catalogId: string; kind: Piece["kind"] }): string {
+  return `placed ${phraseForCatalog(piece.catalogId, piece.kind)}`;
 }
 
 /** One line about the human context, for `noticed` and the status chip. */
@@ -576,7 +746,7 @@ function humanNotice(skips: string[]): string | null {
 
 /** Ease the camera to frame the scene the first time the agent builds. */
 function focusCameraIfFirstBuild(hadPiecesBefore: boolean) {
-  if (!hadPiecesBefore && occupancyMap().size > 0) {
+  if (!hadPiecesBefore && occupancyMap().size > 0 && !useTown.getState().environment) {
     useTown.getState().bumpFocus();
   }
 }
@@ -587,16 +757,23 @@ function focusCameraIfFirstBuild(hadPiecesBefore: boolean) {
 
 function planScene(theme: string, keepHumanLots: boolean) {
   const occ = occupancyMap();
-  const reserved = keepHumanLots ? occ.keys() : [...occ.entries()].filter(([, p]) => p.owner === "human").map(([lot]) => lot);
-  const todos = planCompleteScene(theme, reserved);
+  const occupied = piecesList().flatMap((piece) => {
+    if (!keepHumanLots && piece.owner !== "human") return [];
+    const at = parseLot(piece.lot);
+    if (!at) return [];
+    const item = catalogItem(piece.catalogId);
+    return [{ col: at.col, row: at.row, r: item ? clearanceLots(item) : 0.7 }];
+  });
+  const { env, todos } = planCompleteScene(theme, occupied);
   const skip = keepHumanLots
     ? humanLockLots(occ).map((lot) => ({ lot, why: `human-owned ${occ.get(lot)?.id ?? ""}`.trim() }))
     : [];
 
   return {
+    env,
     todos,
     skip,
-    note: `Nothing placed. ${todos.length} pieces planned as a complete scene. Feed todos to place_piece or place_batch as {id: place, lot, flip, reason} — copy reason through verbatim.`,
+    note: `No pieces placed. ${todos.length} pieces planned across ${env.zones.length} zones. Feed todos to place_piece or place_batch as {id: place, lot, flip, rot, reason} — copy reason through verbatim.`,
   };
 }
 
@@ -726,25 +903,38 @@ export const TOWN_TOOLS: ModelContextTool[] = [
   {
     name: "plan_scene",
     description:
-      "Plan a complete scene without mutating anything. Uses the FULL Kenney catalog (every pack, every id — not a featured subset). Pass theme (e.g. 'pirate dock with boats and cars', 'cozy living room', 'cube pet zoo') and optional keep_human_lots (default true). Returns a full layout of todos [{id, place: catalog-id, lot, flip, reason}] with real spacing — not a pile. Call list_catalog if you need ids, then get_occupancy, then this, then place EVERY todo (place_piece or place_batch). Do not stop after a handful of pieces.",
+      "Plan a complete composed scene. Uses the FULL Kenney catalog (every pack, every id — not a featured subset). Pass theme (e.g. 'pirate dock with boats and cars', 'cozy living room', 'cube pet zoo') and optional keep_human_lots (default true). Plans architecture first — platforms, elevation, walls, stairs, zones — then todos [{id, place: catalog-id, lot, flip, rot, reason}] clustered by zone. By default the architecture is STAGED onto the canvas immediately (pieces are not placed; pass stage_environment:false for a pure dry run). Call list_catalog if you need ids, then get_occupancy, then this, then place EVERY todo (place_piece or place_batch). Do not stop after a handful of pieces.",
     inputSchema: {
       type: "object",
       properties: {
         theme: { type: "string", description: "What to build, e.g. 'pirate dock', 'market street', 'skate park'. Defaults to the human's Nudge goal when omitted." },
         keep_human_lots: { type: "boolean", description: "Default true. Never plan over human lots." },
+        stage_environment: { type: "boolean", description: "Default true: adopt the planned platforms/walls/stairs as the canvas architecture so placed pieces stand on it." },
       },
     },
     annotations: { readOnlyHint: true },
     execute: (input) => {
       const theme = String(input.theme ?? "").slice(0, 120) || (useTown.getState().nudgeGoal ?? "");
       const keep = input.keep_human_lots !== false;
-      return okWide(planScene(theme, keep));
+      const plan = planScene(theme, keep);
+      if (input.stage_environment !== false) {
+        useTown.getState().setEnvironment(plan.env);
+        useTown.getState().bumpFocus();
+      }
+      // The env spec itself stays out of the payload — the zones summary is
+      // what an agent needs, and hosts cap tool output sizes.
+      const { env, ...rest } = plan;
+      return okWide({
+        ...rest,
+        zones: env.zones.map((z) => `${z.id}:${z.type}@${lotId(z.rect.c0, z.rect.r0)} ${z.rect.w}x${z.rect.d}${z.level ? ` up${z.level}` : ""}`),
+        environment_staged: input.stage_environment !== false,
+      });
     },
   },
   {
     name: "place_piece",
     description:
-      `Place one Kenney object from the catalog. Pass id (catalog id, preferred — e.g. ${ID_EXAMPLES}) or kind (stall|prop|character|tree|crate|machine|ramp|dungeon|boat|pirate|car|pet|food|furniture|building|cave|space|nature|coaster). Target a lot (A1-style) OR relative_to (piece id) + side (north|south|east|west) + optional gap. No x,y — the page picks the cell; with no target it grows the scene. Refuses occupied and human-locked lots, returns the new id plus empty lots. For a full scene use plan_scene then place every todo. ${AGENT_WRITE_RULES}`,
+      `Place one Kenney object from the catalog. Pass id (catalog id, preferred — e.g. ${ID_EXAMPLES}) or kind (stall|prop|character|tree|crate|machine|ramp|dungeon|boat|pirate|car|pet|food|furniture|building|cave|space|nature|coaster). Target a lot (A1-style) OR relative_to (piece id) + side (north|south|east|west) + optional gap. No x,y — the page picks the cell; with no target it grows the scene. Refuses occupied lots, overlapping footprints, and human-locked lots, returns the new id plus empty lots. For a full scene use plan_scene then place every todo. ${AGENT_WRITE_RULES}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -756,6 +946,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
         side: { type: "string", enum: [...SIDES] },
         gap: { type: "number", description: "Cells away from relative_to, 1-3. Default 1." },
         flip: { type: "boolean", description: "Mirror horizontally so the piece faces the opposite isometric direction." },
+        rot: { type: "number", description: "Optional facing: 0|90|180|270 degrees of yaw. 0 faces the camera-south; 90 faces west; 180 north; 270 east." },
         reason: { type: "string", description: "Copy this todo's reason from plan_scene verbatim (e.g. 'the centerpiece', 'out over the water') so the story can narrate the scene by zone." },
       },
     },
@@ -765,11 +956,14 @@ export const TOWN_TOOLS: ModelContextTool[] = [
       const intent = chipText(input.intent);
       const hadPieces = occupancyMap().size > 0;
       const ghostLot = spec.lot && parseLot(spec.lot) ? spec.lot.trim().toUpperCase() : null;
-      beginWrite(intent ?? `placing ${spec.item.label}`, ghostLot ? { lot: ghostLot, catalogId: spec.item.id } : null);
+      beginWrite(
+        intent ?? `placing ${phraseForCatalog(spec.item.id, spec.item.kind)}`,
+        ghostLot ? { lot: ghostLot, catalogId: spec.item.id } : null,
+      );
       const outcome = agentPlaceOne(spec);
       await afterRender();
       if (!outcome.ok) {
-        endWrite(`blocked: ${outcome.why.slice(0, 70)}`);
+        endWrite("couldn't place that");
         if (outcome.why.includes("locked")) {
           // `lot` is the exact target the agent was refused — structured, so
           // the narrator resolves the blocker from its own chapter registry
@@ -780,7 +974,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
       }
       focusCameraIfFirstBuild(hadPieces);
       const noticed = humanNotice([]) ?? `placed ${outcome.piece.id} on ${outcome.piece.lot}`;
-      endWrite(`placed ${outcome.piece.id} on ${outcome.piece.lot}`);
+      endWrite(chipPlace(outcome.piece));
       return ok({
         noticed,
         intent: intent ?? undefined,
@@ -792,7 +986,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
   {
     name: "place_batch",
     description:
-      `Place many catalog objects in one call — the right tool for building a complete scene. Before placing, say what you noticed and what you will build — pass it as intent. items: array of place_piece specs ({id or kind, lot? or relative_to+side+gap?, flip?, reason?}), applied in order — copy each todo's reason through verbatim. Human locks and collisions are skipped, not fatal. Returns per-item ok/skip, occupancy, and a one-line noticed: string. Place every planned todo; do not stop early. ${AGENT_WRITE_RULES}`,
+      `Place many catalog objects in one call — the right tool for building a complete scene. Before placing, say what you noticed and what you will build — pass it as intent. items: array of place_piece specs ({id or kind, lot? or relative_to+side+gap?, flip?, rot?, reason?}), applied in order — copy each todo's reason and rot through verbatim. Human locks and collisions are skipped, not fatal. Returns per-item ok/skip, occupancy, and a one-line noticed: string. Place every planned todo; do not stop early. ${AGENT_WRITE_RULES}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -810,6 +1004,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
               side: { type: "string", enum: [...SIDES] },
               gap: { type: "number" },
               flip: { type: "boolean" },
+              rot: { type: "number" },
               reason: { type: "string" },
             },
           },
@@ -852,7 +1047,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
       if (humanLine) {
         useTown.getState().pushEvent({ actor: "agent", verb: "blocked", detail: humanLine });
       }
-      endWrite(noticed);
+      endWrite(placed ? `placed ${placed} piece${placed === 1 ? "" : "s"}` : "nothing landed");
       return ok({ noticed, intent: intent ?? undefined, items: report, occupancy: occupancySnapshot() });
     },
   },
@@ -901,13 +1096,24 @@ export const TOWN_TOOLS: ModelContextTool[] = [
       if (holder && holder.id !== piece.id) {
         return fail(occupiedHint(target, occ).error, { empty_nearby: nearestEmpties(target, occ) });
       }
+      if (reservedLots(store.environment).has(target)) {
+        return fail(`Lot ${target} holds the stairs.`, { empty_nearby: nearestEmpties(target, occ) });
+      }
+      const item = catalogItem(piece.catalogId);
+      if (item) {
+        const blocker = lotCollision(target, item, piece.id);
+        if (blocker) {
+          return fail(`Too close to ${blocker.id}.`, { empty_nearby: nearestEmpties(target, occ, 4, item) });
+        }
+      }
       const intent = chipText(input.intent);
-      beginWrite(intent ?? `moving ${piece.id} to ${target}`, { lot: target, catalogId: piece.catalogId });
+      const phrase = phraseForCatalog(piece.catalogId, piece.kind);
+      beginWrite(intent ?? `moving ${phrase}`, { lot: target, catalogId: piece.catalogId });
       store.patchPiece(piece.id, { lot: target });
-      store.setAgentLastMove(`moved ${piece.id} to ${target}`);
+      store.setAgentLastMove(`moved ${phrase}`);
       store.pushEvent({ actor: "agent", verb: "move", pieceId: piece.id, catalogId: piece.catalogId, kind: piece.kind, lot: target });
       await afterRender();
-      endWrite(`moved ${piece.id} to ${target}`);
+      endWrite(`moved ${phrase}`);
       return ok({ noticed: `moved ${piece.id} to ${target}`, intent: intent ?? undefined, moved: { id: piece.id, lot: target }, occupancy: occupancySnapshot() });
     },
   },
@@ -930,10 +1136,11 @@ export const TOWN_TOOLS: ModelContextTool[] = [
       if (piece.locked) return fail(`${piece.id} is human-locked. Leave its label to the human.`);
       const text = clampLabel(String(input.text ?? ""));
       store.patchPiece(piece.id, { label: text });
-      store.setAgentLastMove(`labeled ${piece.id} "${text}"`);
+      const phrase = phraseForCatalog(piece.catalogId, piece.kind);
+      store.setAgentLastMove(text ? `named ${phrase} ${text}` : `cleared the name on ${phrase}`);
       store.pushEvent({ actor: "agent", verb: "label", pieceId: piece.id, catalogId: piece.catalogId, kind: piece.kind, lot: piece.lot, label: text });
       await afterRender();
-      endWrite(`labeled ${piece.id}`);
+      endWrite(text ? `named ${phrase} ${text}` : `cleared a name`);
       return ok({ noticed: `labeled ${piece.id}`, labeled: { id: piece.id, label: text } });
     },
   },
@@ -962,10 +1169,11 @@ export const TOWN_TOOLS: ModelContextTool[] = [
         }
       }
       store.deletePiece(piece.id);
-      store.setAgentLastMove(`removed ${piece.id} from ${piece.lot}`);
+      const phrase = phraseForCatalog(piece.catalogId, piece.kind);
+      store.setAgentLastMove(`removed ${phrase}`);
       store.pushEvent({ actor: "agent", verb: "remove", pieceId: piece.id, catalogId: piece.catalogId, kind: piece.kind, lot: piece.lot });
       await afterRender();
-      endWrite(`removed ${piece.id}`);
+      endWrite(`removed ${phrase}`);
       return ok({ noticed: `removed ${piece.id} from ${piece.lot}`, removed: piece.id, occupancy: occupancySnapshot() });
     },
   },
