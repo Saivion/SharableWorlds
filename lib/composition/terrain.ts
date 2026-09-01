@@ -140,6 +140,12 @@ export function paintTerrain(island: IslandMask, theme: ThemeSpec, sceneSeed: st
   for (const layer of theme.accent) paintLayer(layer.m, layer.share, [1.2, 2.4]);
   for (const layer of theme.rare) paintLayer(layer.m, layer.share, [0.8, 1.4]);
 
+  // Warm color flecks — small seeded blobs of ochre, coral, terracotta so
+  // every biome gets desert-sunset pinks/oranges/reds, not just sand themes.
+  for (const m of themeSpeckleMaterials(theme)) {
+    paintLayer(m, [0.025, 0.06], [0.55, 1.1]);
+  }
+
   // Coast fringe — a beach lip, a mud shore — where the theme wants one.
   if (theme.edgeMaterial) {
     for (const cell of coastCells(island)) {
@@ -151,6 +157,33 @@ export function paintTerrain(island: IslandMask, theme: ThemeSpec, sceneSeed: st
   }
 
   return [...assigned.values()];
+}
+
+/** Per-theme warm accent materials for tiny color flecks on the foundation. */
+function themeSpeckleMaterials(theme: ThemeSpec): GroundCell["m"][] {
+  switch (theme.id) {
+    case "desert":
+    case "beach":
+    case "pirate-isle":
+      return ["ochre", "terracotta", "coral", "ember"];
+    case "volcanic":
+      return ["ember", "ochre", "terracotta"];
+    case "candy":
+    case "toybox":
+    case "garden":
+      return ["candy-pink", "coral", "ochre"];
+    case "autumn":
+      return ["ember", "ochre", "terracotta", "coral"];
+    case "industrial":
+      return ["ochre", "terracotta", "ember", "coral"];
+    case "snow":
+      return ["ice", "stone"];
+    case "spooky":
+    case "dungeon":
+      return ["shadow-purple", "ember"];
+    default:
+      return ["ochre", "terracotta", "ember", "sand-dark", "coral"];
+  }
 }
 
 /** All water lots in the live environment — for repainting after edits. */

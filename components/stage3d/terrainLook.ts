@@ -11,12 +11,12 @@ export { DECK_BLOCK };
 /** Subdivisions per lot. 2×2 cubes so a region reads as voxels, not a spreadsheet. */
 export const GROUND_SUB = 2;
 
-const GRASS = ["#8fbf62", "#6fa04a", "#5a8c3e", "#7eb056"];
-const SAND = ["#e8c878", "#d4b05c", "#c4a050", "#f0d490"];
-const STONE = ["#c4c0ba", "#a8a49e", "#8e8a84", "#d4d0ca"];
-const WOOD = ["#c49462", "#a87a4c", "#d0a070", "#8e6840"];
-const ROAD = ["#6a686e", "#58565c", "#7c7a80", "#4e4c52"];
-const TILE = ["#a8b0b8", "#8f99a2", "#b4bcc4", "#7e8890"];
+const GRASS = ["#8fbf62", "#6fa04a", "#5a8c3e", "#7eb056", "#a8c878", "#4a9038"];
+const SAND = ["#e8c878", "#d4b05c", "#c4a050", "#f0d490", "#f4b868", "#b89048"];
+const STONE = ["#c4c0ba", "#a8a49e", "#8e8a84", "#d4d0ca", "#989088", "#b8b4ae"];
+const WOOD = ["#c49462", "#a87a4c", "#d0a070", "#8e6840", "#b88458", "#d8b080"];
+const ROAD = ["#6a686e", "#58565c", "#7c7a80", "#4e4c52", "#747278", "#626068"];
+const TILE = ["#a8b0b8", "#8f99a2", "#b4bcc4", "#7e8890", "#c0c8d0", "#9aa4ac"];
 const WATER = ["#4a7eaa", "#3f739c", "#5a8cb8", "#35688e"];
 const WATER_DEEP = ["#35688e", "#2d5a7a", "#3f739c", "#285878"];
 const WATER_MID = ["#4a7eaa", "#4678a0", "#5a8cb8", "#3f739c"];
@@ -35,26 +35,52 @@ const PALETTE: Record<PlatformMaterial, string[]> = {
   wood: WOOD,
   road: ROAD,
   tile: TILE,
-  "grass-dark": ["#4c7838", "#3f6830", "#5a8842", "#456f34"],
-  "grass-dry": ["#b8a860", "#a89850", "#c4b470", "#988a48"],
-  dirt: ["#9a7850", "#886844", "#a8865c", "#7a5e3c"],
-  moss: ["#6f9450", "#5f8444", "#7fa45c", "#54783c"],
-  mud: ["#6e5844", "#5e4a38", "#7e6650", "#52412f"],
-  "stone-dark": ["#6e6a66", "#5e5a56", "#7e7a76", "#524e4a"],
-  cobble: ["#98928a", "#867f77", "#a8a29a", "#746e66"],
-  "stone-mossy": ["#8a9478", "#788466", "#9aa488", "#687456"],
-  "sand-dark": ["#c4a050", "#b08e42", "#d4b05c", "#9c7e3a"],
-  "earth-cracked": ["#b89878", "#a68664", "#c8a888", "#947656"],
-  snow: ["#f0f4f8", "#e2e8f0", "#f8fbff", "#d6dee8"],
-  ice: ["#c0dcec", "#aed0e4", "#d2e8f4", "#9cc4da"],
-  ash: ["#5a5654", "#4a4644", "#6a6664", "#3e3a38"],
-  "rock-dark": ["#4a4442", "#3c3634", "#585250", "#2f2a28"],
-  ember: ["#8a4432", "#a05238", "#743826", "#b8603e"],
-  "candy-pink": ["#f4a8c4", "#e894b4", "#fabcd4", "#dc80a4"],
-  "candy-mint": ["#a8e4c4", "#94d8b4", "#bcf0d4", "#80cca4"],
-  "candy-cream": ["#f8ecd0", "#f0e0bc", "#fef6e2", "#e6d4a8"],
-  "candy-lilac": ["#ccb4e4", "#bca0d8", "#dcc8f0", "#ac8ccc"],
-  "shadow-purple": ["#5e5470", "#4e4560", "#6e6480", "#423a52"],
+  "grass-dark": ["#4c7838", "#3f6830", "#5a8842", "#456f34", "#688850", "#385828"],
+  "grass-dry": ["#b8a860", "#a89850", "#c4b470", "#988a48", "#d4b878", "#c89840"],
+  dirt: ["#9a7850", "#886844", "#a8865c", "#7a5e3c", "#b89060", "#6e5030"],
+  moss: ["#6f9450", "#5f8444", "#7fa45c", "#54783c", "#88a868", "#507838"],
+  mud: ["#6e5844", "#5e4a38", "#7e6650", "#52412f", "#907058", "#483828"],
+  "stone-dark": ["#6e6a66", "#5e5a56", "#7e7a76", "#524e4a", "#888480", "#4a4642"],
+  cobble: ["#98928a", "#867f77", "#a8a29a", "#746e66", "#b0aaa0", "#686058"],
+  "stone-mossy": ["#8a9478", "#788466", "#9aa488", "#687456", "#a8b090", "#607048"],
+  "sand-dark": ["#c4a050", "#b08e42", "#d4b05c", "#9c7e3a", "#e0b868", "#a87830"],
+  "earth-cracked": ["#b89878", "#a68664", "#c8a888", "#947656", "#d8b898", "#886848"],
+  ochre: ["#e8a840", "#d49030", "#f0b850", "#c07828", "#f8c868", "#b06820"],
+  terracotta: ["#c86048", "#b85038", "#d87058", "#a04030", "#e87860", "#903828"],
+  coral: ["#f08878", "#e07060", "#f8a090", "#d05848", "#f89888", "#c84838"],
+  snow: ["#f0f4f8", "#e2e8f0", "#f8fbff", "#d6dee8", "#fafcff", "#c8d4e0"],
+  ice: ["#c0dcec", "#aed0e4", "#d2e8f4", "#9cc4da", "#dceef8", "#8cb8d0"],
+  ash: ["#5a5654", "#4a4644", "#6a6664", "#3e3a38", "#7a7674", "#343030"],
+  "rock-dark": ["#4a4442", "#3c3634", "#585250", "#2f2a28", "#686260", "#282422"],
+  ember: ["#8a4432", "#a05238", "#743826", "#b8603e", "#c87048", "#903020"],
+  "candy-pink": ["#f4a8c4", "#e894b4", "#fabcd4", "#dc80a4", "#ffc0d8", "#d06898"],
+  "candy-mint": ["#a8e4c4", "#94d8b4", "#bcf0d4", "#80cca4", "#c8f8e0", "#70c098"],
+  "candy-cream": ["#f8ecd0", "#f0e0bc", "#fef6e2", "#e6d4a8", "#fff8e8", "#dcc898"],
+  "candy-lilac": ["#ccb4e4", "#bca0d8", "#dcc8f0", "#ac8ccc", "#e8d8f8", "#9878c0"],
+  "shadow-purple": ["#5e5470", "#4e4560", "#6e6480", "#423a52", "#807890", "#383048"],
+};
+
+/** Warm/cool flashes inside a lot — seeded per sub-voxel, never per-block noise. */
+const SPECKLE: Partial<Record<PlatformMaterial, string[]>> = {
+  grass: ["#d4a848", "#c87858", "#e8b868", "#b89048", "#f0a878"],
+  "grass-dark": ["#8a6840", "#a87850", "#687838", "#c89848"],
+  "grass-dry": ["#e87850", "#d86040", "#f0a868", "#c84838", "#f08868"],
+  sand: ["#f08860", "#e87048", "#f8b878", "#d85838", "#f0a068"],
+  "sand-dark": ["#e87848", "#d06030", "#f09858", "#c04828"],
+  dirt: ["#c87848", "#b86038", "#d89058", "#a04828"],
+  stone: ["#c8a898", "#b89078", "#d8b8a0", "#a87858"],
+  cobble: ["#c89878", "#b88060", "#d8a890", "#a86848"],
+  "earth-cracked": ["#e87850", "#d86038", "#f0a070", "#c04828"],
+  ember: ["#e87848", "#f09860", "#d04828", "#ff8868"],
+  ochre: ["#f8c048", "#e8a030", "#ffd060", "#d08820"],
+  terracotta: ["#f07860", "#e06048", "#ff9078", "#c04030"],
+  coral: ["#ffa898", "#f08878", "#ffb8a8", "#e06858"],
+  moss: ["#a8c860", "#98b850", "#b8d870", "#789838"],
+  mud: ["#a87850", "#987040", "#b89060", "#806030"],
+  tile: ["#c8b0a0", "#b89888", "#d8c0b0", "#a88070"],
+  road: ["#8a7870", "#7a6860", "#9a8880", "#6a5850"],
+  "candy-pink": ["#ffe0e8", "#ffc0d0", "#ffb0c8", "#f0a0b8"],
+  "candy-cream": ["#fff8e8", "#ffe8c8", "#fff0d8", "#f0d8a8"],
 };
 
 export const FLANK: Record<PlatformMaterial, string> = {
@@ -74,6 +100,9 @@ export const FLANK: Record<PlatformMaterial, string> = {
   "stone-mossy": "#5c644c",
   "sand-dark": "#8a6f34",
   "earth-cracked": "#7c6248",
+  ochre: "#d49030",
+  terracotta: "#b85038",
+  coral: "#e07060",
   snow: "#b8c4d4",
   ice: "#84a8c0",
   ash: "#36322f",
@@ -104,6 +133,9 @@ export const DECK_FILL: Record<PlatformMaterial, string> = {
   "stone-mossy": "#788466",
   "sand-dark": "#b08e42",
   "earth-cracked": "#a68664",
+  ochre: "#e8a840",
+  terracotta: "#c86048",
+  coral: "#f08878",
   snow: "#e2e8f0",
   ice: "#aed0e4",
   ash: "#4a4644",
@@ -128,9 +160,13 @@ function pick(palette: string[], h: number): string {
   return palette[h % palette.length];
 }
 
-/** Shade inside the region's own palette. Never a foreign material. */
+/** Shade inside the region's own palette, with occasional warm speckles. */
 export function blockHex(gx: number, gz: number, material: PlatformMaterial): string {
-  return pick(PALETTE[material] ?? GRASS, hash2(gx, gz));
+  const h = hash2(gx, gz);
+  const speckles = SPECKLE[material];
+  // ~14% of sub-voxels flash a warmer accent within the same biome family.
+  if (speckles && h % 7 === 0) return pick(speckles, hash2(gx + 11, gz + 17));
+  return pick(PALETTE[material] ?? GRASS, h);
 }
 
 /** Themed walk color — falls back to the classic pale path. */

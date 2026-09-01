@@ -21,7 +21,7 @@ export type PlatformMaterial =
   // stonework
   | "stone-dark" | "cobble" | "stone-mossy"
   // arid
-  | "sand-dark" | "earth-cracked"
+  | "sand-dark" | "earth-cracked" | "ochre" | "terracotta" | "coral"
   // cold
   | "snow" | "ice"
   // volcanic
@@ -36,7 +36,7 @@ export const GROUND_MATERIALS: PlatformMaterial[] = [
   "grass", "stone", "wood", "sand", "road", "tile",
   "grass-dark", "grass-dry", "dirt", "moss", "mud",
   "stone-dark", "cobble", "stone-mossy",
-  "sand-dark", "earth-cracked",
+  "sand-dark", "earth-cracked", "ochre", "terracotta", "coral",
   "snow", "ice",
   "ash", "rock-dark", "ember",
   "candy-pink", "candy-mint", "candy-cream", "candy-lilac",
