@@ -54,11 +54,43 @@ export function zoneAt(env: EnvironmentSpec | null, col: number, row: number) {
   return null;
 }
 
-/** Lots the environment itself occupies — stairs are solid, nothing stands on them. */
+const STAIR_STEPS: Record<string, [number, number]> = {
+  n: [0, 1],
+  s: [0, -1],
+  e: [-1, 0],
+  w: [1, 0],
+};
+
+/** The step-on (bottom) and step-off (top) cells of every stair — the HARD
+ * no-blocking rule: these must stay clear or the stair is decorative. */
+export function stairApproachLots(env: EnvironmentSpec | null): Set<string> {
+  const out = new Set<string>();
+  if (!env) return out;
+  for (const s of env.stairs) {
+    const [dc, dr] = STAIR_STEPS[s.dir] ?? [0, 1];
+    out.add(lotIdOf(s.at.col + dc, s.at.row + dr)); // bottom approach
+    out.add(lotIdOf(s.at.col - dc, s.at.row - dr)); // top step-off
+  }
+  return out;
+}
+
+/** Every path cell as a lot id — walkways the realism rules keep clear. */
+export function pathLots(env: EnvironmentSpec | null): Set<string> {
+  const out = new Set<string>();
+  if (!env) return out;
+  for (const path of env.paths) {
+    for (const cell of path.cells) out.add(lotIdOf(cell.col, cell.row));
+  }
+  return out;
+}
+
+/** Lots the environment itself occupies — stairs are solid, and their
+ * approach cells stay clear so every stair remains usable. */
 export function reservedLots(env: EnvironmentSpec | null): Set<string> {
   const out = new Set<string>();
   if (!env) return out;
   for (const s of env.stairs) out.add(lotIdOf(s.at.col, s.at.row));
+  for (const lot of stairApproachLots(env)) out.add(lot);
   return out;
 }
 

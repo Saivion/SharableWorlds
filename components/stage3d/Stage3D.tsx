@@ -15,7 +15,7 @@ import {
   type WheelEvent as ReactWheelEvent,
 } from "react";
 import * as THREE from "three";
-import { catalogItem } from "@/lib/catalog";
+import { catalogItem, type CatalogItem } from "@/lib/catalog";
 import { autoGroundPads } from "@/lib/composition/autoEnv";
 import { DECK_BLOCK, ELEV, PLINTH_DEPTH, TILE, worldOf } from "@/lib/composition/grid3d";
 import { environmentBounds, reservedLots, surfaceAt } from "@/lib/composition/surface";
@@ -24,6 +24,8 @@ import { registerLotProjector } from "@/lib/stageProjection";
 import { useTown } from "@/lib/store";
 import { humanFlip, humanMove, humanPlace, lotId, occupancyMap, parseLot } from "@/lib/town";
 import { Environment3D } from "./Environment3D";
+import { InstancedPieces, type InstancedEntry } from "./InstancedPieces";
+import { PieceArrive } from "./legoDrop";
 import { ModelPiece } from "./ModelPiece";
 
 /**
@@ -42,6 +44,9 @@ const CAM_DIST = 90;
 const BASE_VIEW_W = 46; // world units across the viewport at zoom 1
 const CAMERA = { zoom: 0.85, minZoom: 0.35, maxZoom: 3.2, easeMaxZoom: 1.25, easeMinZoom: 0.55 };
 
+/** A catalog id repeated this often collapses into an instanced group. */
+const INSTANCE_MIN = 3;
+
 const SIN_AZ = Math.sin(AZ);
 const COS_AZ = Math.cos(AZ);
 const SIN_EL = Math.sin(EL);
@@ -51,6 +56,27 @@ type CameraState = { tx: number; tz: number; zoom: number };
 
 const HOME = worldOf(12, 12); // M13 — same home center as the 2D board
 
+/**
+ * Camera state lives OUTSIDE React. Panning fires per pointermove and the
+ * focus ease per animation frame — routing those through setState re-rendered
+ * the entire piece tree on every tick. The rig reads this store in useFrame
+ * (already per-frame); the dotted-paper sync subscribes directly.
+ */
+const camStore = {
+  state: { tx: HOME.x, tz: HOME.z, zoom: CAMERA.zoom } as CameraState,
+  listeners: new Set<() => void>(),
+  set(patch: Partial<CameraState>) {
+    Object.assign(camStore.state, patch);
+    for (const l of camStore.listeners) l();
+  },
+  subscribe(l: () => void) {
+    camStore.listeners.add(l);
+    return () => {
+      camStore.listeners.delete(l);
+    };
+  },
+};
+
 function zoomPx(viewportW: number, zoom: number) {
   return (viewportW / BASE_VIEW_W) * zoom;
 }
@@ -58,10 +84,8 @@ function zoomPx(viewportW: number, zoom: number) {
 /** Keeps the default orthographic camera on the iso rail and registers the
  * lot → screen projector the agent cursor uses. */
 function CameraRig({
-  cam,
   surfaceYAt,
 }: {
-  cam: CameraState;
   surfaceYAt: (col: number, row: number) => number;
 }) {
   const camera = useThree((s) => s.camera);
@@ -71,14 +95,15 @@ function CameraRig({
 
   useEffect(() => {
     if (process.env.NODE_ENV === "production") return;
-    (window as unknown as { __stage3d?: { scene: THREE.Scene; camera: THREE.Camera } }).__stage3d = { scene, camera };
-  }, [scene, camera]);
+    (window as unknown as { __stage3d?: { scene: THREE.Scene; camera: THREE.Camera; gl: THREE.WebGLRenderer } }).__stage3d = { scene, camera, gl };
+  }, [scene, camera, gl]);
 
   // Applied every frame — immune to mount-order races between R3F's own
   // camera management and React effects. Mutating the camera in useFrame is
   // the idiomatic R3F pattern; the immutability lint rule predates it.
   /* eslint-disable react-hooks/immutability */
   useFrame(() => {
+    const cam = camStore.state;
     const ortho = camera as THREE.OrthographicCamera;
     ortho.position.set(
       cam.tx + CAM_DIST * SIN_AZ * COS_EL,
@@ -147,6 +172,42 @@ function Lights({ center, extent }: { center: { x: number; z: number }; extent: 
   );
 }
 
+/** Developer overlay (`?perf`): live renderer stats written straight into a
+ * DOM node — no React state, so the probe itself costs nothing to observe. */
+const PERF_HUD_ID = "stage3d-perf-hud";
+
+function PerfProbe() {
+  const acc = useRef({ frames: 0, t0: 0 });
+  useFrame(({ gl, scene }) => {
+    const a = acc.current;
+    const now = performance.now();
+    if (a.t0 === 0) a.t0 = now;
+    a.frames += 1;
+    if (now - a.t0 < 500) return;
+    const fps = (a.frames * 1000) / (now - a.t0);
+    a.frames = 0;
+    a.t0 = now;
+    const el = document.getElementById(PERF_HUD_ID);
+    if (!el) return;
+    let meshes = 0;
+    let instanced = 0;
+    let instances = 0;
+    scene.traverse((o) => {
+      if ((o as THREE.InstancedMesh).isInstancedMesh) {
+        instanced += 1;
+        instances += (o as THREE.InstancedMesh).count;
+      } else if ((o as THREE.Mesh).isMesh) meshes += 1;
+    });
+    const info = gl.info;
+    el.textContent =
+      `${fps.toFixed(0)} fps · ${info.render.calls} calls · ` +
+      `${(info.render.triangles / 1000).toFixed(1)}k tris · ` +
+      `${meshes} mesh · ${instanced} imesh (${instances} inst) · ` +
+      `${info.memory.geometries} geo · ${info.memory.textures} tex · ${info.programs?.length ?? 0} prog`;
+  });
+  return null;
+}
+
 /** One failed model must never take the whole canvas down with it. */
 class PieceBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
@@ -181,58 +242,106 @@ export function Stage3D() {
   const agentGhost = useTown((s) => s.agentGhost);
   const focusToken = useTown((s) => s.focusToken);
 
-  const [cam, setCam] = useState<CameraState>({ tx: HOME.x, tz: HOME.z, zoom: CAMERA.zoom });
   const [spaceDown, setSpaceDown] = useState(false);
   const [hover, setHover] = useState<{ col: number; row: number } | null>(null);
   const [moving, setMoving] = useState<{ id: string; fromLot: string } | null>(null);
 
   const wrapRef = useRef<HTMLDivElement>(null);
-  const camRef = useRef(cam);
   const panRef = useRef<{ pointerId: number; lastX: number; lastY: number } | null>(null);
   const moveRef = useRef<{ pointerId: number; id: string; fromLot: string } | null>(null);
   const camAnim = useRef<number | null>(null);
-
-  useEffect(() => {
-    camRef.current = cam;
-  }, [cam]);
 
   const debug = useSyncExternalStore(
     () => () => {},
     () => window.location.search.includes("debug"),
     () => false,
   );
+  const perf = useSyncExternalStore(
+    () => () => {},
+    () => window.location.search.includes("perf"),
+    () => false,
+  );
 
   // Keep the studio's dotted-paper pattern world-locked, the way the 2D
   // stage panned it: the dots anchor to the world origin and travel with it.
+  // Subscribes to the camera store directly — no React render in the loop.
   useEffect(() => {
     const main = document.querySelector("main.studio");
     if (!(main instanceof HTMLElement)) return;
     const sync = () => {
       const w = wrapRef.current?.clientWidth ?? 1;
       const h = wrapRef.current?.clientHeight ?? 1;
-      const px = zoomPx(w, camRef.current.zoom);
-      const { tx, tz } = camRef.current;
+      const px = zoomPx(w, camStore.state.zoom);
+      const { tx, tz } = camStore.state;
       const dx = (-tx * COS_AZ + tz * SIN_AZ) * px;
       const dy = -(tx * SIN_AZ + tz * COS_AZ) * SIN_EL * px;
       main.style.backgroundSize = "20px 20px";
       main.style.backgroundPosition = `${w / 2 + dx}px ${h / 2 + dy}px`;
     };
     sync();
+    const unsub = camStore.subscribe(sync);
     window.addEventListener("resize", sync);
-    return () => window.removeEventListener("resize", sync);
-  }, [cam]);
+    return () => {
+      unsub();
+      window.removeEventListener("resize", sync);
+    };
+  }, []);
 
   const handMode = tool === "hand" || spaceDown;
   const placing = tool === "place" && activeId != null;
   const canMove = tool === "select" && !handMode;
 
-  const occ = occupancyMap();
+  // occupancyMap reads the store itself — `pieces` is its invalidation key.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const occ = useMemo(() => occupancyMap(), [pieces]);
   const reserved = useMemo(() => reservedLots(environment), [environment]);
   const autoPads = useMemo(() => autoGroundPads(pieces, environment), [pieces, environment]);
   const surfaceYAt = useMemo(
     () => (col: number, row: number) => surfaceAt(environment, col, row).y,
     [environment],
   );
+
+  // Repeated static models render as instances — one draw call per sub-mesh
+  // for the whole group instead of one per piece. Characters/pets (rigged),
+  // flipped pieces (a mirrored instance matrix has a negative determinant,
+  // which inverts instanced normals and renders the model black), and the
+  // piece being moved (needs the translucent clone) stay per-piece.
+  const movingId = moving?.id ?? null;
+  const noInstancing = useSyncExternalStore(
+    () => () => {},
+    () => window.location.search.includes("noinst"),
+    () => false,
+  );
+  const instanceGroups = useMemo(() => {
+    const by = new Map<string, { item: CatalogItem; entries: InstancedEntry[] }>();
+    if (noInstancing) return [];
+    for (const piece of Object.values(pieces)) {
+      if (piece.id === movingId || piece.flip) continue;
+      const item = catalogItem(piece.catalogId);
+      if (!item?.model || item.kind === "character" || item.kind === "pet") continue;
+      const parsed = parseLot(piece.lot);
+      if (!parsed) continue;
+      const { x, z } = worldOf(parsed.col, parsed.row);
+      const entry: InstancedEntry = {
+        id: piece.id,
+        col: parsed.col,
+        row: parsed.row,
+        x,
+        y: surfaceYAt(parsed.col, parsed.row),
+        z,
+        rot: piece.rot ?? 0,
+      };
+      const group = by.get(piece.catalogId);
+      if (group) group.entries.push(entry);
+      else by.set(piece.catalogId, { item, entries: [entry] });
+    }
+    return [...by.values()].filter((g) => g.entries.length >= INSTANCE_MIN);
+  }, [pieces, movingId, surfaceYAt, noInstancing]);
+  const instancedIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const g of instanceGroups) for (const e of g.entries) ids.add(e.id);
+    return ids;
+  }, [instanceGroups]);
 
   // Keyboard: Space pans, F flips the selection — same contract as the 2D stage.
   useEffect(() => {
@@ -293,14 +402,14 @@ export function Stage3D() {
       tz: cz + shift * SIN_AZ,
       zoom,
     };
-    const from = { ...camRef.current };
+    const from = { ...camStore.state };
     const start = performance.now();
     const DURATION = 900;
     if (camAnim.current) cancelAnimationFrame(camAnim.current);
     const step = (now: number) => {
       const t = Math.min(1, (now - start) / DURATION);
       const e = 1 - Math.pow(1 - t, 3);
-      setCam({
+      camStore.set({
         tx: from.tx + (target.tx - from.tx) * e,
         tz: from.tz + (target.tz - from.tz) * e,
         zoom: from.zoom + (target.zoom - from.zoom) * e,
@@ -326,7 +435,7 @@ export function Stage3D() {
     const pan = panRef.current;
     if (!pan || pan.pointerId !== e.pointerId) return;
     const w = wrapRef.current?.clientWidth ?? 1;
-    const px = zoomPx(w, camRef.current.zoom);
+    const px = zoomPx(w, camStore.state.zoom);
     const dx = e.clientX - pan.lastX;
     const dy = e.clientY - pan.lastY;
     pan.lastX = e.clientX;
@@ -334,11 +443,10 @@ export function Stage3D() {
     // Drag-the-world: the grabbed ground point stays under the pointer.
     const rx = -dx / px;
     const fz = dy / (px * SIN_EL);
-    setCam((c) => ({
-      ...c,
-      tx: c.tx + rx * COS_AZ - fz * SIN_AZ,
-      tz: c.tz - rx * SIN_AZ - fz * COS_AZ,
-    }));
+    camStore.set({
+      tx: camStore.state.tx + rx * COS_AZ - fz * SIN_AZ,
+      tz: camStore.state.tz - rx * SIN_AZ - fz * COS_AZ,
+    });
   }
 
   function onPointerUp(e: ReactPointerEvent<HTMLDivElement>) {
@@ -368,7 +476,7 @@ export function Stage3D() {
 
   function onWheel(e: ReactWheelEvent<HTMLDivElement>) {
     const factor = Math.exp(-e.deltaY * 0.0016);
-    setCam((c) => ({ ...c, zoom: Math.min(CAMERA.maxZoom, Math.max(CAMERA.minZoom, c.zoom * factor)) }));
+    camStore.set({ zoom: Math.min(CAMERA.maxZoom, Math.max(CAMERA.minZoom, camStore.state.zoom * factor)) });
   }
 
   // --- Scene-level picking -------------------------------------------------
@@ -482,7 +590,8 @@ export function Stage3D() {
           gl.toneMappingExposure = 1.06;
         }}
       >
-        <CameraRig cam={cam} surfaceYAt={surfaceYAt} />
+        <CameraRig surfaceYAt={surfaceYAt} />
+        {perf && <PerfProbe />}
         <Lights center={lightCenter} extent={lightExtent} />
         <Environment resolution={256} environmentIntensity={0.42}>
           <Lightformer intensity={1.4} position={[14, 18, 10]} scale={[22, 10, 1]} form="rect" />
@@ -535,7 +644,18 @@ export function Stage3D() {
           );
         })}
 
-        {/* Pieces */}
+        {/* Repeated models, one instanced group per catalog id */}
+        {instanceGroups.map((g) => (
+          <PieceBoundary key={`inst-${g.item.id}`}><Suspense fallback={null}>
+            <InstancedPieces
+              item={g.item}
+              entries={g.entries}
+              onPieceDown={(id, e) => pieceDown(id)(e)}
+            />
+          </Suspense></PieceBoundary>
+        ))}
+
+        {/* Pieces — instanced ids keep their pads/labels here, models above */}
         {Object.values(pieces).map((piece) => {
           const parsed = parseLot(piece.lot);
           const item = catalogItem(piece.catalogId);
@@ -545,22 +665,29 @@ export function Stage3D() {
           const isSelected = selectedIds.has(piece.id);
           const isHover = hoverLot === piece.lot;
           const isMoving = moving?.id === piece.id;
+          const isInstanced = instancedIds.has(piece.id);
           return (
             <group key={piece.id}>
               {(isSelected || isHover) && (
                 <LotPad col={parsed.col} row={parsed.row} y={y} strong={isSelected} />
               )}
-              <PieceBoundary><Suspense fallback={null}>
-                <ModelPiece
-                  item={item}
-                  position={[x, y, z]}
-                  flip={piece.flip}
-                  rot={piece.rot}
-                  dim={isMoving}
-                  grow
-                  onPointerDown={pieceDown(piece.id)}
-                />
-              </Suspense></PieceBoundary>
+              {!isInstanced && (
+                <PieceArrive col={parsed.col} row={parsed.row}>
+                  {(snapping) => (
+                    <PieceBoundary><Suspense fallback={null}>
+                      <ModelPiece
+                        item={item}
+                        position={[x, y, z]}
+                        flip={piece.flip}
+                        rot={piece.rot}
+                        dim={isMoving}
+                        grow={!snapping}
+                        onPointerDown={pieceDown(piece.id)}
+                      />
+                    </Suspense></PieceBoundary>
+                  )}
+                </PieceArrive>
+              )}
               {piece.label !== "" && (isSelected || isHover) && (
                 <Html position={[x, y + 2.4, z]} center zIndexRange={[10, 0]} style={{ pointerEvents: "none" }}>
                   <div className="iso-tag3d">{piece.label}</div>
@@ -623,6 +750,24 @@ export function Stage3D() {
           );
         })()}
       </Canvas>
+      {perf && (
+        <div
+          id={PERF_HUD_ID}
+          style={{
+            position: "absolute",
+            left: 10,
+            bottom: 8,
+            padding: "4px 8px",
+            borderRadius: 6,
+            background: "rgba(12, 12, 14, 0.72)",
+            color: "#c9f27c",
+            font: "11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace",
+            pointerEvents: "none",
+            zIndex: 30,
+            whiteSpace: "nowrap",
+          }}
+        />
+      )}
     </div>
   );
 }

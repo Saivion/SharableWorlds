@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useState, type CSSProperties } from "react";
+import { parseShareParams } from "@/lib/composition/seed";
 import { runGoalBuild } from "@/lib/goalRunner";
 import { seedReferenceScene } from "@/lib/scenes/reference";
 import { callTownTool, registerTownTools, TOWN_TOOLS } from "@/lib/town";
+import { SeedChip } from "./SeedChip";
 import { AGENT_ACCENT, useTown } from "@/lib/store";
 import type { ToolMode } from "@/lib/types";
 import { Stage3D } from "./stage3d/Stage3D";
@@ -56,8 +58,15 @@ export function Studio() {
     void runGoalBuild(nudgeGoal);
   }, [nudgeToken, nudgeGoal]);
 
-  // First visit opens on the composed reference diorama, not an empty canvas.
+  // Boot: a share URL (?scene=…&seed=…) reconstructs that exact procedural
+  // world — the seed is sufficient, no coordinates travel in the link.
+  // Otherwise the first visit opens on the authored reference diorama.
   useEffect(() => {
+    const shared = parseShareParams(window.location.search);
+    if (shared) {
+      void callTownTool("compose_scene", { theme: shared.prompt, seed: shared.seed });
+      return;
+    }
     seedReferenceScene();
   }, []);
 
@@ -190,6 +199,7 @@ export function Studio() {
       <div className="studio-hint">
         Select to drag objects · F to flip toward each other · pick a piece, click anywhere · Space + drag to pan · scroll to zoom
       </div>
+      <SeedChip />
       <HoverTipHost />
     </main>
   );

@@ -1,10 +1,21 @@
 "use client";
 
 import { useFrame } from "@react-three/fiber";
-import { useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
+import { memo, useLayoutEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import { DECK_BLOCK, ELEV, PLINTH_DEPTH, TILE, type LotRect } from "@/lib/composition/grid3d";
-import type { EnvironmentSpec, PlatformMaterial, StairSpec, WallSpec } from "@/lib/composition/types";
+import type { EnvironmentSpec, PlatformMaterial, StairSpec, WallSpec, WaterTone } from "@/lib/composition/types";
+import {
+  DROP,
+  SNAP,
+  SnapDown,
+  currentWave,
+  dropDelay,
+  easeOut,
+  legoPop,
+  startFoundationWave,
+  waveOrigin,
+} from "./legoDrop";
 import {
   GROUND_SUB,
   blockHex,
@@ -12,7 +23,7 @@ import {
   getGrainTexture,
   hash2,
   isRubble,
-  pathHex,
+  pathHexFor,
   rubbleHex,
   waterHex,
 } from "./terrainLook";
@@ -25,81 +36,6 @@ import {
 
 const WALL_COLOR = "#e4dccb";
 const WALL_CAP = "#b9a98d";
-const DROP = 5.4;
-const SNAP = 0.48;
-const WAVE = 0.016;
-
-function easeOut(t: number) {
-  const u = Math.min(1, Math.max(0, t));
-  return 1 - Math.pow(1 - u, 3);
-}
-
-function dropDelay(gx: number, gz: number, origin: number) {
-  return Math.max(0, (gx + gz - origin) * WAVE);
-}
-
-function waveOrigin(rects: LotRect[]): number {
-  let minC = Infinity;
-  let minR = Infinity;
-  for (const r of rects) {
-    if (r.c0 < minC) minC = r.c0;
-    if (r.r0 < minR) minR = r.r0;
-  }
-  if (!Number.isFinite(minC)) return 0;
-  return (minC + minR) * GROUND_SUB;
-}
-
-function legoPop(t: number) {
-  const u = t / SNAP;
-  if (u < 0.82) return 0.2 + easeOut(u) * 0.92;
-  return 1 + Math.sin(((u - 0.82) / 0.18) * Math.PI) * 0.08;
-}
-
-/** One piece falling in from above and snapping down — Lego click. */
-function SnapDown({
-  delay = 0,
-  children,
-}: {
-  delay?: number;
-  children: ReactNode;
-}) {
-  const ref = useRef<THREE.Group>(null);
-  const born = useRef(0);
-  const done = useRef(false);
-  useLayoutEffect(() => {
-    born.current = performance.now();
-    done.current = false;
-    const g = ref.current;
-    if (g) {
-      g.position.y = DROP;
-      g.scale.setScalar(0.04);
-    }
-  }, [delay]);
-  useFrame(() => {
-    const g = ref.current;
-    if (!g || done.current || born.current === 0) return;
-    const t = (performance.now() - born.current) / 1000 - delay;
-    if (t < 0) {
-      g.position.y = DROP;
-      g.scale.setScalar(0.04);
-      return;
-    }
-    if (t >= SNAP) {
-      g.position.y = 0;
-      g.scale.setScalar(1);
-      done.current = true;
-      return;
-    }
-    const e = easeOut(t / SNAP);
-    g.position.y = DROP * (1 - e);
-    g.scale.setScalar(legoPop(t));
-  });
-  return (
-    <group ref={ref} position={[0, DROP, 0]} scale={0.04}>
-      {children}
-    </group>
-  );
-}
 
 function useGrain() {
   return useMemo(() => getGrainTexture(), []);
@@ -139,6 +75,8 @@ function GroundBlocks({
   material,
   origin,
   kind = "land",
+  cellMaterial,
+  cellWaterTone,
 }: {
   rect: LotRect;
   top: number;
@@ -146,6 +84,10 @@ function GroundBlocks({
   material: PlatformMaterial;
   origin: number;
   kind?: "land" | "water";
+  /** Per-lot themed override — material patches painted by the terrain system. */
+  cellMaterial?: (col: number, row: number) => PlatformMaterial | undefined;
+  /** Per-lot water tone — seeded patch regions from paintWater. */
+  cellWaterTone?: (col: number, row: number) => WaterTone | undefined;
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const rubbleRef = useRef<THREE.InstancedMesh>(null);
@@ -180,7 +122,7 @@ function GroundBlocks({
   }, [rect.c0, rect.r0, rect.w, rect.d, wet, sub, size]);
 
   useLayoutEffect(() => {
-    born.current = performance.now();
+    born.current = currentWave()?.born ?? performance.now();
     done.current = false;
     const mesh = meshRef.current;
     if (!mesh) return;
@@ -210,7 +152,9 @@ function GroundBlocks({
             dummy.scale.set(0.04, 0.04, 0.04);
             dummy.updateMatrix();
             mesh.setMatrixAt(i, dummy.matrix);
-            color.set(wet ? waterHex(gx, gz) : blockHex(gx, gz, material));
+            const cellMat = (!wet && cellMaterial?.(rect.c0 + dc, rect.r0 + dr)) || material;
+            const tone = wet ? cellWaterTone?.(rect.c0 + dc, rect.r0 + dr) : undefined;
+            color.set(wet ? waterHex(gx, gz, tone) : blockHex(gx, gz, cellMat));
             mesh.setColorAt(i, color);
             i += 1;
           }
@@ -244,14 +188,15 @@ function GroundBlocks({
         dummy.scale.set(0.04, 0.04, 0.04);
         dummy.updateMatrix();
         rubble.setMatrixAt(ri, dummy.matrix);
-        color.set(rubbleHex(spot.gx, spot.gz));
+        const rubbleMat = cellMaterial?.(Math.floor(spot.gx / sub), Math.floor(spot.gz / sub)) ?? material;
+        color.set(rubbleHex(spot.gx, spot.gz, rubbleMat));
         rubble.setColorAt(ri, color);
       });
       rubble.instanceMatrix.needsUpdate = true;
       if (rubble.instanceColor) rubble.instanceColor.needsUpdate = true;
     }
     rubbleRest.current = rubbleCells;
-  }, [rect.c0, rect.r0, rect.w, rect.d, material, wet, top, bottom, origin, sub, size, dummy, rubbleSpots]);
+  }, [rect.c0, rect.r0, rect.w, rect.d, material, wet, top, bottom, origin, sub, size, dummy, rubbleSpots, cellMaterial, cellWaterTone]);
 
   useFrame(() => {
     if (done.current || born.current === 0) return;
@@ -345,17 +290,19 @@ function Platform({
   material,
   inset,
   origin,
+  cellMaterial,
 }: {
   rect: LotRect;
   level: number;
   material: PlatformMaterial;
   inset?: boolean;
   origin: number;
+  cellMaterial?: (col: number, row: number) => PlatformMaterial | undefined;
 }) {
   const top = level * ELEV + (inset ? 0.06 : 0);
   const height = inset ? 0.06 : top + PLINTH_DEPTH;
   const bottom = top - height;
-  return <GroundBlocks rect={rect} top={top} bottom={bottom} material={material} origin={origin} />;
+  return <GroundBlocks rect={rect} top={top} bottom={bottom} material={material} origin={origin} cellMaterial={cellMaterial} />;
 }
 
 function Wall({ wall }: { wall: WallSpec }) {
@@ -427,19 +374,84 @@ function Stair({ stair }: { stair: StairSpec }) {
   );
 }
 
-function PathCell({ col, row, y, origin }: { col: number; row: number; y: number; origin: number }) {
-  const color = pathHex(col, row);
+type PathCellSpec = { col: number; row: number; y: number };
+
+/** Every walk cell in the scene as ONE instanced mesh — shared geometry,
+ * shared material, per-instance color — instead of a mesh + material per
+ * cell. Rides the same foundation wave as the ground bricks. */
+function PathBlocks({ cells, origin, material }: { cells: PathCellSpec[]; origin: number; material?: PlatformMaterial }) {
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  const dummy = useMemo(() => new THREE.Object3D(), []);
+  const born = useRef(0);
+  const done = useRef(false);
+
+  useLayoutEffect(() => {
+    born.current = currentWave()?.born ?? performance.now();
+    done.current = false;
+    const mesh = meshRef.current;
+    if (!mesh) return;
+    const color = new THREE.Color();
+    cells.forEach((c, i) => {
+      dummy.position.set(c.col * TILE, c.y + 0.02 + DROP, c.row * TILE);
+      dummy.scale.setScalar(0.04);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+      color.set(pathHexFor(c.col, c.row, material));
+      mesh.setColorAt(i, color);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }, [cells, material, dummy]);
+
+  useFrame(() => {
+    if (done.current || born.current === 0) return;
+    const mesh = meshRef.current;
+    if (!mesh) return;
+    const t0 = (performance.now() - born.current) / 1000;
+    let remaining = false;
+    cells.forEach((c, i) => {
+      const t = t0 - dropDelay(c.col * GROUND_SUB, c.row * GROUND_SUB, origin);
+      if (t < 0) {
+        remaining = true;
+        dummy.position.set(c.col * TILE, c.y + 0.02 + DROP, c.row * TILE);
+        dummy.scale.setScalar(0.04);
+      } else if (t >= SNAP) {
+        dummy.position.set(c.col * TILE, c.y + 0.02, c.row * TILE);
+        dummy.scale.setScalar(1);
+      } else {
+        remaining = true;
+        dummy.position.set(c.col * TILE, c.y + 0.02 + DROP * (1 - easeOut(t / SNAP)), c.row * TILE);
+        dummy.scale.setScalar(legoPop(t));
+      }
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (!remaining) done.current = true;
+  });
+
   return (
-    <SnapDown delay={dropDelay(col * GROUND_SUB, row * GROUND_SUB, origin)}>
-      <mesh position={[col * TILE, y + 0.02, row * TILE]} receiveShadow>
-        <boxGeometry args={[TILE * 0.55, 0.04, TILE * 0.55]} />
-        <meshStandardMaterial color={color} roughness={0.88} metalness={0.02} />
-      </mesh>
-    </SnapDown>
+    <instancedMesh
+      key={cells.length}
+      ref={meshRef}
+      args={[undefined, undefined, Math.max(1, cells.length)]}
+      receiveShadow
+      frustumCulled={false}
+    >
+      <boxGeometry args={[TILE * 0.55, 0.04, TILE * 0.55]} />
+      <meshStandardMaterial roughness={0.88} metalness={0.02} />
+    </instancedMesh>
   );
 }
 
-export function Environment3D({
+/** The wave restarts only when the architecture itself changes — module
+ * state, like the wave clock in legoDrop, because it must be read and set
+ * during render (children mounting in the same pass ride the same wave). */
+let lastWaveKey: string | null = null;
+
+/** memo: the architecture only re-renders when the environment actually
+ * changes — hover/selection churn in the stage above never reaches it. */
+export const Environment3D = memo(function Environment3D({
   env,
   autoPads,
   surfaceYAt,
@@ -457,6 +469,45 @@ export function Environment3D({
     return waveOrigin(rects);
   }, [env, autoPads]);
 
+  // Start the shared drop clock during render so pieces that mount in this
+  // same pass (compose, share URL, reference scene) see the wave before paint.
+  const envId = env
+    ? `${env.platforms.map((p) => `${p.id}:${p.rect.c0}:${p.rect.r0}:${p.rect.w}x${p.rect.d}:${p.level}`).join("|")}/${env.water.map((w) => `${w.id}:${w.rect.c0}:${w.rect.r0}`).join("|")}`
+    : "empty";
+  if (lastWaveKey !== envId) {
+    // Deliberate render-time side effect: children mounting in this same
+    // pass read the wave clock before paint — an effect fires too late.
+    // eslint-disable-next-line react-hooks/globals
+    lastWaveKey = envId;
+    startFoundationWave(origin);
+  }
+
+  // Themed material patches: one lookup shared by every land platform strip.
+  const ground = env?.ground;
+  const cellMaterial = useMemo(() => {
+    if (!ground?.length) return undefined;
+    const map = new Map<string, PlatformMaterial>();
+    for (const g of ground) map.set(`${g.col}:${g.row}`, g.m);
+    return (col: number, row: number) => map.get(`${col}:${row}`);
+  }, [ground]);
+
+  const waterCells = env?.waterCells;
+  const cellWaterTone = useMemo(() => {
+    if (!waterCells?.length) return undefined;
+    const map = new Map<string, WaterTone>();
+    for (const w of waterCells) map.set(`${w.col}:${w.row}`, w.t);
+    return (col: number, row: number) => map.get(`${col}:${row}`);
+  }, [waterCells]);
+
+  const paths = env?.paths;
+  const pathCells = useMemo(
+    () =>
+      (paths ?? []).flatMap((path) =>
+        path.cells.map((cell) => ({ col: cell.col, row: cell.row, y: surfaceYAt(cell.col, cell.row) })),
+      ),
+    [paths, surfaceYAt],
+  );
+
   return (
     <group>
       {env?.platforms.map((p) => (
@@ -467,6 +518,7 @@ export function Environment3D({
           material={p.material}
           inset={p.inset}
           origin={origin}
+          cellMaterial={p.inset || p.level > 0 ? undefined : cellMaterial}
         />
       ))}
       {autoPads.map((pad, i) => (
@@ -476,28 +528,18 @@ export function Environment3D({
         const y = surfaceYAt(w.c, w.r);
         return (
           <group key={w.id} position={[0, y, 0]}>
-            <SnapDown delay={dropDelay(w.c * GROUND_SUB, w.r * GROUND_SUB, origin)}>
+            <SnapDown delay={dropDelay(w.c * GROUND_SUB, w.r * GROUND_SUB, origin)} bornAt={currentWave()?.born}>
               <Wall wall={w} />
             </SnapDown>
           </group>
         );
       })}
       {env?.stairs.map((s) => (
-        <SnapDown key={s.id} delay={dropDelay(s.at.col * GROUND_SUB, s.at.row * GROUND_SUB, origin)}>
+        <SnapDown key={s.id} delay={dropDelay(s.at.col * GROUND_SUB, s.at.row * GROUND_SUB, origin)} bornAt={currentWave()?.born}>
           <Stair stair={s} />
         </SnapDown>
       ))}
-      {env?.paths.map((path) =>
-        path.cells.map((cell, i) => (
-          <PathCell
-            key={`${path.id}-${i}`}
-            col={cell.col}
-            row={cell.row}
-            y={surfaceYAt(cell.col, cell.row)}
-            origin={origin}
-          />
-        )),
-      )}
+      {pathCells.length > 0 && <PathBlocks cells={pathCells} origin={origin} material={env?.pathMaterial} />}
       {env?.water.map((w) => {
         const top = w.level * ELEV - 0.22;
         const height = top + PLINTH_DEPTH - 0.05;
@@ -510,9 +552,10 @@ export function Environment3D({
             material="sand"
             origin={origin}
             kind="water"
+            cellWaterTone={cellWaterTone}
           />
         );
       })}
     </group>
   );
-}
+});

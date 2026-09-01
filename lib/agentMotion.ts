@@ -129,7 +129,9 @@ export async function travelCursor(to: { x: number; y: number }, ms: number, gen
 }
 
 export async function waitForKitCell(catalogId: string, gen: number): Promise<{ x: number; y: number } | null> {
-  for (let i = 0; i < 24; i += 1) {
+  // A short wait only — a cell that hasn't scrolled into view in ~250ms
+  // falls back to the palette itself rather than stalling the whole build.
+  for (let i = 0; i < 6; i += 1) {
     if (!isMotionCurrent(gen)) return null;
     const pt = kitCellPoint(catalogId);
     if (pt) return pt;

@@ -725,8 +725,8 @@ const RESPECT_AMBIENT = [
 ];
 
 const EMPTY_FALLBACK = [
-  "Nothing's been placed yet. Drop in a piece, or hand the agent a Nudge, and this is where the story starts.",
-  "The board's empty and waiting — pick something from the kit, or set a goal, and there'll be something to tell.",
+  "Nothing's been placed yet. Drop in a piece, or tap Surprise Me, and this is where the story starts.",
+  "The board's empty and waiting — pick something from the kit, or tap Surprise Me, and there'll be something to tell.",
   "No pieces yet, no story yet. Both start the same way: place something.",
   "Empty for now — which just means anything could happen next.",
   "Nothing here yet. Just an open lot, waiting for the first move.",

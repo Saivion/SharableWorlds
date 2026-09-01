@@ -1,9 +1,41 @@
 "use client";
 
 import { CATALOG, catalogItem, defaultForKind, FEATURED, type CatalogItem } from "./catalog";
+import {
+  addZone,
+  clusterForZone,
+  focalCandidate,
+  pathBetweenPoints,
+  resolvePoint,
+  type ZoneLocation,
+  type ZoneSize,
+} from "./composition/ops";
 import { clearanceLots } from "./composition/scale3d";
-import { platformAt, reservedLots } from "./composition/surface";
+import {
+  GENERATOR_VERSION,
+  createSeededRandom,
+  deriveSeed,
+  fingerprint,
+  generateSceneSeed,
+  isValidSeed,
+  normalizeSeed,
+  shareUrl,
+} from "./composition/seed";
+import { pathLots, platformAt, reservedLots } from "./composition/surface";
 import { rectContains } from "./composition/grid3d";
+import { cellKey } from "./composition/island";
+import { SCENE_RULES } from "./composition/rules";
+import {
+  boundaryPool,
+  buildFrameSkip,
+  landMaskFromEnv,
+  paintTerrain,
+  planBoundary,
+  withWaterPaint,
+} from "./composition/terrain";
+import { THEMES, resolveTheme, themeById } from "./composition/themes";
+import { GROUND_MATERIALS, type GroundCell, type PlatformMaterial, type ZoneType } from "./composition/types";
+import { validateScene } from "./composition/validate";
 import { snapLotCoord } from "./iso";
 import { clampLabel, useTown } from "./store";
 import { buildStory, phraseForCatalog } from "./story";
@@ -520,6 +552,24 @@ export function placePiece(spec: PlaceSpec, owner: Owner): PlaceOutcome {
       lot,
     };
   }
+  // HARD walkway rule for the agent: bulky pieces never block a path.
+  // Characters, pets, and tabletop food may stand on one — a walkway with
+  // people on it is alive; a walkway with a wardrobe on it is blocked.
+  if (
+    owner === "agent" &&
+    spec.item.kind !== "character" &&
+    spec.item.kind !== "pet" &&
+    spec.item.kind !== "food" &&
+    clearanceLots(spec.item) >= 0.6 &&
+    pathLots(useTown.getState().environment).has(lot)
+  ) {
+    return {
+      ok: false,
+      why: `Lot ${lot} is a walkway — paths stay walkable. Place beside it.`,
+      empty_nearby: nearestEmpties(lot, occ, 4, spec.item),
+      lot,
+    };
+  }
 
   const store = useTown.getState();
   const id = `${spec.item.id}-${store.bumpCounter(spec.item.id)}`;
@@ -709,8 +759,8 @@ function chipText(value: unknown): string | null {
 }
 
 /** Show the model's stated intent on the canvas the moment a write starts.
- * During a local Nudge loop the runner owns the chip (it sets the line before
- * travel so the text matches the cursor), so skip the status write here. */
+ * During a local Surprise-Me build loop the runner owns the chip (it sets the
+ * line before travel so the text matches the cursor), so skip it here. */
 function beginWrite(intent: string | null, ghost: { lot: string; catalogId: string } | null) {
   const store = useTown.getState();
   if (intent && !store.agentLoop) store.setAgentStatus(intent);
@@ -755,7 +805,7 @@ function focusCameraIfFirstBuild(hadPiecesBefore: boolean) {
 // plan_scene — a proposal, never a mutation.
 // ---------------------------------------------------------------------------
 
-function planScene(theme: string, keepHumanLots: boolean) {
+function planScene(theme: string, keepHumanLots: boolean, sceneSeed?: string) {
   const occ = occupancyMap();
   const occupied = piecesList().flatMap((piece) => {
     if (!keepHumanLots && piece.owner !== "human") return [];
@@ -764,7 +814,7 @@ function planScene(theme: string, keepHumanLots: boolean) {
     const item = catalogItem(piece.catalogId);
     return [{ col: at.col, row: at.row, r: item ? clearanceLots(item) : 0.7 }];
   });
-  const { env, todos } = planCompleteScene(theme, occupied);
+  const { env, todos, seed } = planCompleteScene(theme, occupied, sceneSeed);
   const skip = keepHumanLots
     ? humanLockLots(occ).map((lot) => ({ lot, why: `human-owned ${occ.get(lot)?.id ?? ""}`.trim() }))
     : [];
@@ -772,9 +822,71 @@ function planScene(theme: string, keepHumanLots: boolean) {
   return {
     env,
     todos,
+    seed,
     skip,
-    note: `No pieces placed. ${todos.length} pieces planned across ${env.zones.length} zones. Feed todos to place_piece or place_batch as {id: place, lot, flip, rot, reason} — copy reason through verbatim.`,
+    note: `No pieces placed. ${todos.length} pieces planned across ${env.zones.length} zones. Place ALL todos with ONE place_batch call as {id: place, lot, flip, rot, reason} — copy reason through verbatim — then validate_scene.`,
   };
+}
+
+/** Adopt a plan's seed as the board's scene identity. */
+function rememberScene(seed: string, prompt: string) {
+  useTown.getState().setSceneMeta({
+    seed,
+    prompt,
+    sceneType: seed.split("-")[0]?.toLowerCase(),
+    version: GENERATOR_VERSION,
+    createdAt: Date.now(),
+  });
+}
+
+function sceneShareUrl(): string | undefined {
+  const meta = useTown.getState().sceneMeta;
+  if (!meta || typeof window === "undefined") return undefined;
+  return shareUrl(window.location.origin, meta);
+}
+
+/**
+ * The full deterministic build: sweep the agent's previous scene, plan
+ * `theme` under `seed`, stage the architecture, place every todo, validate.
+ * Shared by compose_scene, regenerate_scene, and set_scene_seed(rebuild) —
+ * and by the share-URL boot path, so an imported seed reproduces its world.
+ */
+async function buildScene(theme: string, sceneSeed: string | undefined) {
+  const store = useTown.getState();
+  let swept = 0;
+  for (const piece of Object.values(store.pieces)) {
+    if (piece.owner === "agent" && !piece.locked) {
+      store.deletePiece(piece.id);
+      swept += 1;
+    }
+  }
+  const plan = planScene(theme, true, sceneSeed);
+  useTown.getState().setEnvironment(plan.env);
+  rememberScene(plan.seed, theme);
+  useTown.getState().bumpFocus();
+  const results: Record<string, unknown>[] = [];
+  let placed = 0;
+  for (const todo of plan.todos) {
+    const item = catalogItem(todo.place);
+    if (!item) continue;
+    const outcome = agentPlaceOne({
+      item,
+      lot: todo.lot,
+      flip: todo.flip,
+      ...(todo.rot ? { rot: todo.rot } : {}),
+      reason: todo.reason,
+    });
+    if (outcome.ok) {
+      placed += 1;
+      results.push({ ok: true, id: outcome.piece.id, lot: outcome.piece.lot });
+    } else {
+      results.push({ ok: false, skip: `${todo.place}: ${outcome.why.slice(0, 60)}` });
+    }
+  }
+  await afterRender();
+  const state = useTown.getState();
+  const validation = validateScene(state.environment, state.pieces, theme);
+  return { plan, swept, placed, results, validation };
 }
 
 // ---------------------------------------------------------------------------
@@ -788,7 +900,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
   {
     name: "get_occupancy",
     description:
-      "Call first. Read-only map of the scene: grid size, catalog_pieces (full Kenney catalog size — every id is placeable), goal (the human's standing Nudge — build toward it when set), filled lots as lot:id:owner (owner is human|agent), empty lots, human_locks (must not be written), the human's selection, and last_human_actions (what the person just did). Empty lots are the only legal targets. Browse every id with list_catalog.",
+      "READ — call first, every session. The map of the scene: grid size, catalog_pieces (full Kenney catalog size — every id is placeable), goal (the board's standing goal, set when the human taps Surprise Me — build toward it when set), filled lots as lot:id:owner (owner is human|agent), empty lots, human_locks (must not be written), the human's selection, and last_human_actions (what the person just did). Empty lots are the only legal targets. THE LIFECYCLE: get_occupancy → compose_scene for a full scene (or a targeted create_*/place_piece for a small addition) → validate_scene → repair failed checks → validate_scene again. Browse ids with list_catalog.",
     inputSchema: { type: "object", properties: {} },
     annotations: { readOnlyHint: true },
     execute: () => ok(occupancySnapshot()),
@@ -796,7 +908,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
   {
     name: "list_catalog",
     description:
-      "Read-only. The complete Kenney catalog — every pack, every id, not a featured subset. Filter with pack (e.g. furniture, pets, food, nature, coaster, toy-car), kind (pet|food|furniture|building|cave|space|nature|coaster|character|car|boat|...), or query (substring of id/label). Omit filters to list every pack with all ids. Use these ids in place_piece / place_batch / plan_scene.",
+      "READ. The complete Kenney catalog — every pack, every id, not a featured subset. Filter with pack (e.g. furniture, pets, food, nature, coaster, toy-car), kind (pet|food|furniture|building|cave|space|nature|coaster|character|car|boat|...), or query (substring of id/label). Omit filters to list every pack with all ids. Use these ids in place_piece / place_batch / plan_scene. You rarely need this before compose_scene — the composer selects items itself.",
     inputSchema: {
       type: "object",
       properties: {
@@ -830,7 +942,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
   {
     name: "get_scene",
     description:
-      "Read-only compact list of every placed piece: id:lot:kind:owner:locked-flag:label. Ids embed their catalog id (e.g. pirate-barrel-2). If the list is long you get a count instead — then use get_occupancy plus lookup_object.",
+      "READ — the inspect step. Compact list of every placed piece: id:lot:kind:owner:locked-flag:label. Ids embed their catalog id (e.g. pirate-barrel-2). Call after a significant build phase to see what actually landed before deciding the next move. If the list is long you get a count instead — then use get_occupancy plus lookup_object.",
     inputSchema: { type: "object", properties: {} },
     annotations: { readOnlyHint: true },
     execute: () => {
@@ -850,7 +962,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
   {
     name: "lookup_object",
     description:
-      "Read-only full record for one piece id (from get_occupancy or get_scene): catalog id, kind, lot, sprite src, owner, locked, label.",
+      "READ. Full record for one piece id (from get_occupancy or get_scene): catalog id, kind, lot, sprite src, owner, locked, label.",
     inputSchema: {
       type: "object",
       properties: { id: { type: "string", description: "Piece id, e.g. pirate-barrel-2." } },
@@ -876,7 +988,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
   {
     name: "get_selection",
     description:
-      "Read-only view of what the human has selected right now plus their recent edits. Check this to build around the human's current focus instead of guessing.",
+      "READ. What the human has selected right now plus their recent edits. Check this to build around the human's current focus instead of guessing.",
     inputSchema: { type: "object", properties: {} },
     annotations: { readOnlyHint: true },
     execute: () => {
@@ -891,7 +1003,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
   {
     name: "tell_story",
     description:
-      "Read-only. Turns everything placed so far into a short narrated recap — a few paragraphs of actual prose, not a log — that you can relay to the human in your own words or verbatim. Covers what got built, roughly in what order, and moments where the agent worked around the human's locked pieces. Call this when the human asks what happened, what you built, or for a summary/recap/story of the session.",
+      "READ. Turns everything placed so far into a short narrated recap — a few paragraphs of actual prose, not a log — that you can relay to the human in your own words or verbatim. Covers what got built, roughly in what order, and moments where the agent worked around the human's locked pieces. Call this when the human asks what happened, what you built, or for a summary/recap/story of the session.",
     inputSchema: { type: "object", properties: {} },
     annotations: { readOnlyHint: true },
     execute: () => {
@@ -903,11 +1015,12 @@ export const TOWN_TOOLS: ModelContextTool[] = [
   {
     name: "plan_scene",
     description:
-      "Plan a complete composed scene. Uses the FULL Kenney catalog (every pack, every id — not a featured subset). Pass theme (e.g. 'pirate dock with boats and cars', 'cozy living room', 'cube pet zoo') and optional keep_human_lots (default true). Plans architecture first — platforms, elevation, walls, stairs, zones — then todos [{id, place: catalog-id, lot, flip, rot, reason}] clustered by zone. By default the architecture is STAGED onto the canvas immediately (pieces are not placed; pass stage_environment:false for a pure dry run). Call list_catalog if you need ids, then get_occupancy, then this, then place EVERY todo (place_piece or place_batch). Do not stop after a handful of pieces.",
+      "ADVANCED planner — most requests do NOT need this: compose_scene plans, builds, AND validates in one call, so start there. Use plan_scene only when you want to see or customize the plan before building (pass stage_environment:false for a pure dry run). Pass theme (e.g. 'pirate dock with boats and cars'), optional seed (same theme + same seed = the same plan; omit to mint a fresh world), optional keep_human_lots (default true). Plans architecture first — platforms, elevation, walls, stairs, zones — then todos [{id, place: catalog-id, lot, flip, rot, reason}] clustered by zone. By default the architecture is STAGED onto the canvas and the seed becomes the board's scene identity; pieces are NOT placed. If you build from the plan, place ALL its todos with ONE place_batch call (copy reason and rot through verbatim) — never a loop of place_piece — then validate_scene.",
     inputSchema: {
       type: "object",
       properties: {
-        theme: { type: "string", description: "What to build, e.g. 'pirate dock', 'market street', 'skate park'. Defaults to the human's Nudge goal when omitted." },
+        theme: { type: "string", description: "What to build, e.g. 'pirate dock', 'market street', 'skate park'. Defaults to the board's standing goal (the human's Surprise Me pick) when omitted." },
+        seed: { type: "string", description: "Scene seed like MARKET-8F42KQ. Omit to mint a fresh one." },
         keep_human_lots: { type: "boolean", description: "Default true. Never plan over human lots." },
         stage_environment: { type: "boolean", description: "Default true: adopt the planned platforms/walls/stairs as the canvas architecture so placed pieces stand on it." },
       },
@@ -915,10 +1028,14 @@ export const TOWN_TOOLS: ModelContextTool[] = [
     annotations: { readOnlyHint: true },
     execute: (input) => {
       const theme = String(input.theme ?? "").slice(0, 120) || (useTown.getState().nudgeGoal ?? "");
+      if (input.seed != null && !isValidSeed(input.seed)) {
+        return fail(`"${String(input.seed)}" is not a valid seed. Seeds look like MARKET-8F42KQ.`);
+      }
       const keep = input.keep_human_lots !== false;
-      const plan = planScene(theme, keep);
+      const plan = planScene(theme, keep, input.seed != null ? normalizeSeed(String(input.seed)) : undefined);
       if (input.stage_environment !== false) {
         useTown.getState().setEnvironment(plan.env);
+        rememberScene(plan.seed, theme);
         useTown.getState().bumpFocus();
       }
       // The env spec itself stays out of the payload — the zones summary is
@@ -926,6 +1043,8 @@ export const TOWN_TOOLS: ModelContextTool[] = [
       const { env, ...rest } = plan;
       return okWide({
         ...rest,
+        generator_version: GENERATOR_VERSION,
+        fingerprint: fingerprint({ env, todos: plan.todos }),
         zones: env.zones.map((z) => `${z.id}:${z.type}@${lotId(z.rect.c0, z.rect.r0)} ${z.rect.w}x${z.rect.d}${z.level ? ` up${z.level}` : ""}`),
         environment_staged: input.stage_environment !== false,
       });
@@ -934,7 +1053,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
   {
     name: "place_piece",
     description:
-      `Place one Kenney object from the catalog. Pass id (catalog id, preferred — e.g. ${ID_EXAMPLES}) or kind (stall|prop|character|tree|crate|machine|ramp|dungeon|boat|pirate|car|pet|food|furniture|building|cave|space|nature|coaster). Target a lot (A1-style) OR relative_to (piece id) + side (north|south|east|west) + optional gap. No x,y — the page picks the cell; with no target it grows the scene. Refuses occupied lots, overlapping footprints, and human-locked lots, returns the new id plus empty lots. For a full scene use plan_scene then place every todo. ${AGENT_WRITE_RULES}`,
+      `PRIMITIVE — one object. Use for a single targeted addition ('a tree beside the house'), a correction, or a repair after validate_scene. NEVER build a scene or a group with repeated calls: compose_scene builds whole worlds, create_vegetation plants groups, create_prop_cluster furnishes zones, place_batch places an explicit list in one call. Pass id (catalog id, preferred — e.g. ${ID_EXAMPLES}) or kind (stall|prop|character|tree|crate|machine|ramp|dungeon|boat|pirate|car|pet|food|furniture|building|cave|space|nature|coaster). Target a lot (A1-style) OR relative_to (piece id) + side (north|south|east|west) + optional gap. No x,y — the page picks the cell; with no target it grows the scene. Refuses occupied lots, overlapping footprints, and human-locked lots; returns the new id plus empty lots. ${AGENT_WRITE_RULES}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -986,7 +1105,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
   {
     name: "place_batch",
     description:
-      `Place many catalog objects in one call — the right tool for building a complete scene. Before placing, say what you noticed and what you will build — pass it as intent. items: array of place_piece specs ({id or kind, lot? or relative_to+side+gap?, flip?, rot?, reason?}), applied in order — copy each todo's reason and rot through verbatim. Human locks and collisions are skipped, not fatal. Returns per-item ok/skip, occupancy, and a one-line noticed: string. Place every planned todo; do not stop early. ${AGENT_WRITE_RULES}`,
+      `PRIMITIVE (bulk) — an explicit list of placements in ONE call. Right for plan_scene todos (place EVERY todo, copy reason and rot through verbatim) or an arrangement you designed yourself. For whole scenes prefer compose_scene; for vegetation and zone furnishing prefer create_vegetation / create_prop_cluster — they do the arranging for you. Before placing, say what you noticed and what you will build — pass it as intent. items: array of place_piece specs ({id or kind, lot? or relative_to+side+gap?, flip?, rot?, reason?}), applied in order. Human locks and collisions are skipped, not fatal. Returns per-item ok/skip, occupancy, and a one-line noticed: string. ${AGENT_WRITE_RULES}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1028,6 +1147,10 @@ export const TOWN_TOOLS: ModelContextTool[] = [
           report.push({ ok: false, skip: spec.error });
           continue;
         }
+        // Ghost each drop so the canvas tracks the piece about to land —
+        // never flash the whole batch as one sudden dump.
+        const ghostLot = spec.lot && parseLot(spec.lot) ? spec.lot.trim().toUpperCase() : null;
+        if (ghostLot) useTown.getState().setAgentGhost({ lot: ghostLot, catalogId: spec.item.id });
         const outcome = agentPlaceOne(spec);
         if (outcome.ok) {
           placed += 1;
@@ -1037,6 +1160,10 @@ export const TOWN_TOOLS: ModelContextTool[] = [
           report.push({ ok: false, skip: outcome.why });
         }
         await afterRender();
+        // Beat between drops so PieceArrive can play before the next lands.
+        if (items.length > 1 && typeof window !== "undefined" && !document.hidden) {
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 160));
+        }
       }
       useTown.getState().setAgentLastMove(`placed ${placed} piece${placed === 1 ? "" : "s"} (batch)`);
       focusCameraIfFirstBuild(hadPieces);
@@ -1054,7 +1181,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
   {
     name: "move_piece",
     description:
-      `Move one agent-owned piece to a new lot: id plus lot OR relative_to + side + gap. Refuses human-locked pieces, occupied targets, and off-grid lots. ${AGENT_WRITE_RULES}`,
+      `PRIMITIVE — the repair verb for misplacements. The fix when validate_scene flags a blocked walkway, a stray character, or a piece in the wrong zone: move it, don't rebuild the scene. Pass id plus lot OR relative_to + side + gap. Refuses human-locked pieces, occupied targets, and off-grid lots. ${AGENT_WRITE_RULES}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1120,7 +1247,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
   {
     name: "label_piece",
     description:
-      "Set the text label on one piece: id, text (40 chars max). Labels only. Refuses human-locked pieces.",
+      "PRIMITIVE. Set the text label on one piece: id, text (40 chars max). Labels only. Refuses human-locked pieces.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1147,7 +1274,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
   {
     name: "remove_piece",
     description:
-      "Remove one agent-owned piece by id. Human-owned pieces are refused unless the human currently has that piece selected AND force:true is passed. There is no clear-all.",
+      "PRIMITIVE — the repair verb for excess. Remove one agent-owned piece by id when validate_scene flags clutter or a blocker; never to restart a scene (compose_scene sweeps and rebuilds in one call). Human-owned pieces are refused unless the human currently has that piece selected AND force:true is passed. There is no clear-all.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1177,6 +1304,547 @@ export const TOWN_TOOLS: ModelContextTool[] = [
       return ok({ noticed: `removed ${piece.id} from ${piece.lot}`, removed: piece.id, occupancy: occupancySnapshot() });
     },
   },
+
+  // -------------------------------------------------------------------------
+  // Semantic composition tools — the agent describes ENVIRONMENT INTENT and
+  // the page owns the geometry. These are the preferred surface for building
+  // places; raw place_piece is the low-level escape hatch.
+  // -------------------------------------------------------------------------
+  {
+    name: "compose_scene",
+    description:
+      "SEMANTIC — START HERE for any full scene request ('backyard picnic with burgers and cake', 'spooky graveyard', 'medieval market'). One call: the PAGE composes and constructs the whole environment — architecture first (platforms, elevation, walls, stairs, zones, paths), then clustered props, characters, and a focal point — then validates its own work. Input: theme (free text) and/or type ('market'|'village'|'forest'|'harbor'|...) plus requirements (short phrases like 'central plaza', 'food vendors', 'fountain'), and optional seed (same theme + same seed = the same world; omit to mint a fresh unique one). The agent's previous build is swept first; human pieces are preserved and built around. Returns the seed, fingerprint, share_url, zones, per-piece results, and the validation checklist with completion %. Read the validation: if complete:false, repair the named checks with create_zone / create_prop_cluster / create_focal_point / create_path / create_vegetation / move_piece, then validate_scene again — the scene is done when validation passes, not when this call returns. For a SMALL addition to an existing scene, do NOT call this (it rebuilds the world) — use place_piece or a create_* tool.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        theme: { type: "string", description: "Free-text description, e.g. 'small shopping market with a fountain'." },
+        type: { type: "string", description: "Environment type keyword, e.g. market, village, forest, harbor, dungeon, arcade." },
+        requirements: {
+          type: "array",
+          items: { type: "string" },
+          description: "Short phrases the scene must include, e.g. ['central plaza', 'food vendors', 'storage'].",
+        },
+        seed: { type: "string", description: "Scene seed like MARKET-8F42KQ. Omit to mint a fresh one (a new unique world); pass one to reproduce that exact world." },
+      },
+    },
+    execute: async (input) => {
+      const parts = [
+        typeof input.theme === "string" ? input.theme : "",
+        typeof input.type === "string" ? input.type : "",
+        Array.isArray(input.requirements) ? input.requirements.filter((r) => typeof r === "string").join(" ") : "",
+      ];
+      const theme = parts.join(" ").replace(/\s+/g, " ").trim().slice(0, 160);
+      if (!theme) return fail("Pass theme, type, or requirements — something to compose.");
+      if (input.seed != null && !isValidSeed(input.seed)) {
+        return fail(`"${String(input.seed)}" is not a valid seed. Seeds look like MARKET-8F42KQ.`);
+      }
+      beginWrite(`composing ${theme}`, null);
+      const { plan, swept, placed, results, validation } = await buildScene(
+        theme,
+        input.seed != null ? normalizeSeed(String(input.seed)) : undefined,
+      );
+      endWrite(`composed ${theme} — ${placed} pieces, ${validation.completion}% complete`);
+      return okWide({
+        noticed: `composed ${theme}: ${placed}/${plan.todos.length} pieces across ${plan.env.zones.length} zones${swept ? ` (swept ${swept} old pieces)` : ""} — ${validation.completion}% complete`,
+        seed: plan.seed,
+        generator_version: GENERATOR_VERSION,
+        fingerprint: fingerprint({ env: plan.env, todos: plan.todos }),
+        share_url: sceneShareUrl(),
+        zones: plan.env.zones.map(
+          (z) => `${z.id}:${z.type}@${lotId(z.rect.c0, z.rect.r0)} ${z.rect.w}x${z.rect.d}${z.level ? ` up${z.level}` : ""}`,
+        ),
+        placed,
+        skipped: results.filter((r) => !r.ok).length,
+        validation,
+      });
+    },
+  },
+  {
+    name: "create_zone",
+    description:
+      "SEMANTIC — add ONE functional zone to the current environment; architecture only, no props. The usual repair when validate_scene says a themed zone is missing. Pass type (plaza|home|market|garden|harbor|street|arcade|workshop|keep|lab|camp|skyline), optional location (north|south|east|west|center), size (small|medium|large), label. Interior types (home/arcade/keep/lab) raise a walled terrace with a stair; garden lays a grass bed; harbor digs water and builds a pier; street pours a road. If nothing fits inside the main platform, a new deck is annexed on that side. A walking path to the plaza is threaded automatically. On an empty board this also creates the starter footprint. Fill the zone afterwards with create_prop_cluster.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        type: { type: "string", description: "plaza|home|market|garden|harbor|street|arcade|workshop|keep|lab|camp|skyline" },
+        location: { type: "string", enum: ["north", "south", "east", "west", "center"] },
+        size: { type: "string", enum: ["small", "medium", "large"] },
+        label: { type: "string", description: "Display name, e.g. 'the fish market'. Max 40 chars." },
+      },
+      required: ["type"],
+    },
+    execute: async (input) => {
+      const type = String(input.type ?? "").trim().toLowerCase() as ZoneType;
+      const VALID: ZoneType[] = ["plaza", "home", "market", "garden", "harbor", "street", "arcade", "workshop", "keep", "lab", "camp", "skyline"];
+      if (!VALID.includes(type)) return fail(`Unknown zone type "${type}". Use one of: ${VALID.join("|")}.`);
+      const location = typeof input.location === "string" ? (input.location as ZoneLocation) : undefined;
+      const size = typeof input.size === "string" ? (input.size as ZoneSize) : undefined;
+      const label = typeof input.label === "string" ? input.label : undefined;
+      beginWrite(`laying out ${label ?? type}`, null);
+      const result = addZone(useTown.getState().environment, type, {
+        location,
+        size,
+        label,
+        sceneSeed: useTown.getState().sceneMeta?.seed,
+      });
+      const seed = useTown.getState().sceneMeta?.seed ?? "UNSEEDED";
+      useTown.getState().setEnvironment(withWaterPaint(result.env, seed));
+      useTown.getState().bumpFocus();
+      await afterRender();
+      endWrite(`laid out ${result.zone.label}`);
+      return ok({
+        noticed: `created ${result.zone.id} (${result.zone.type}) at ${lotId(result.zone.rect.c0, result.zone.rect.r0)} ${result.zone.rect.w}x${result.zone.rect.d}${result.zone.level ? ` up${result.zone.level}` : ""} — ${result.note}`,
+        zone: {
+          id: result.zone.id,
+          type: result.zone.type,
+          at: lotId(result.zone.rect.c0, result.zone.rect.r0),
+          size: `${result.zone.rect.w}x${result.zone.rect.d}`,
+          focal: result.zone.focal ? lotId(result.zone.focal.col, result.zone.focal.row) : undefined,
+        },
+        note: "Architecture only — fill it with create_prop_cluster, then add people.",
+      });
+    },
+  },
+  {
+    name: "create_path",
+    description:
+      "SEMANTIC — thread a walking path between two points; the repair for a disconnected-zones validation failure. Pass from and to as zone ids ('market'), zone types, or lot ids ('M13'). The path is clipped to the decks — it never crosses the void.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        from: { type: "string", description: "Zone id/type or lot id." },
+        to: { type: "string", description: "Zone id/type or lot id." },
+      },
+      required: ["from", "to"],
+    },
+    execute: async (input) => {
+      const env = useTown.getState().environment;
+      if (!env) return fail("No environment yet. plan_scene or create_zone first.");
+      const a = resolvePoint(env, String(input.from ?? ""));
+      const b = resolvePoint(env, String(input.to ?? ""));
+      if (!a || !b) return fail(`Could not resolve ${!a ? `"${String(input.from)}"` : `"${String(input.to)}"`}. Use a zone id from get_occupancy or a lot id.`);
+      const path = pathBetweenPoints(env, a, b, `walk-${env.paths.length + 1}`);
+      if (path.cells.length < 2) return fail("Those points share no walkable deck between them.");
+      useTown.getState().setEnvironment({ ...env, paths: [...env.paths, path] });
+      await afterRender();
+      endWrite(`connected ${a.label} to ${b.label}`);
+      return ok({ noticed: `path threaded: ${a.label} → ${b.label} (${path.cells.length} cells)`, path: path.id });
+    },
+  },
+  {
+    name: "create_prop_cluster",
+    description:
+      "SEMANTIC (bulk) — furnish one zone with a purpose-grouped cluster in one call; never furnish a zone piece-by-piece. The page arranges it by the zone's own grammar (stalls face the aisle, furniture backs the walls, trees keep canopy spacing, vehicles queue in lanes) and adds a couple of characters facing the action. Pass zone (id or type from get_occupancy) and optional theme to steer which catalog items are chosen. Collisions and human locks are skipped, not fatal. The repair for an empty or sparse zone.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        zone: { type: "string", description: "Zone id or type, e.g. 'market' or 'garden-2'." },
+        theme: { type: "string", description: "Optional flavor, e.g. 'fresh fruit and bread'." },
+      },
+      required: ["zone"],
+    },
+    execute: async (input) => {
+      const env = useTown.getState().environment;
+      if (!env) return fail("No environment yet. plan_scene or create_zone first.");
+      const ref = String(input.zone ?? "").trim().toLowerCase();
+      const zone = env.zones.find((z) => z.id === ref) ?? env.zones.find((z) => z.type === ref);
+      if (!zone) {
+        return fail(`No zone "${ref}".`, { zones: env.zones.map((z) => `${z.id}:${z.type}`) });
+      }
+      const theme = typeof input.theme === "string" ? input.theme.slice(0, 80) : undefined;
+      beginWrite(`furnishing ${zone.label}`, null);
+      const specs = clusterForZone(env, zone, theme, useTown.getState().sceneMeta?.seed);
+      const results: Record<string, unknown>[] = [];
+      let placed = 0;
+      for (const spec of specs) {
+        const item = catalogItem(spec.id);
+        if (!item) continue;
+        const outcome = agentPlaceOne({
+          item,
+          lot: spec.lot,
+          flip: spec.flip,
+          ...(spec.rot ? { rot: spec.rot } : {}),
+          reason: spec.reason,
+        });
+        if (outcome.ok) {
+          placed += 1;
+          results.push({ ok: true, id: outcome.piece.id, lot: outcome.piece.lot });
+        } else {
+          results.push({ ok: false, skip: outcome.why.slice(0, 50) });
+        }
+      }
+      await afterRender();
+      endWrite(`furnished ${zone.label} — ${placed} pieces`);
+      return ok({
+        noticed: `${zone.label}: placed ${placed}/${specs.length} cluster pieces`,
+        items: results.slice(0, 24),
+        occupancy: occupancySnapshot(),
+      });
+    },
+  },
+  {
+    name: "create_focal_point",
+    description:
+      "SEMANTIC — give a zone its visual anchor: the page picks the most massive themed landmark (or use id for a specific catalog piece) and stands it at the zone's focal lot, nudging to clear ground nearby if needed. Pass zone (id or type, default plaza) and optional theme or id. The repair for a missing-focal-point validation failure.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        zone: { type: "string", description: "Zone id or type. Defaults to the plaza." },
+        theme: { type: "string", description: "Optional flavor for choosing the landmark, e.g. 'fountain'." },
+        id: { type: "string", description: "Exact catalog id to use instead of letting the page choose." },
+      },
+    },
+    execute: async (input) => {
+      const env = useTown.getState().environment;
+      if (!env) return fail("No environment yet. plan_scene or create_zone first.");
+      const ref = String(input.zone ?? "plaza").trim().toLowerCase();
+      const zone = env.zones.find((z) => z.id === ref) ?? env.zones.find((z) => z.type === ref) ?? env.zones[env.zones.length - 1];
+      if (!zone?.focal) return fail("No zone with a focal point. create_zone first.");
+      const theme = typeof input.theme === "string" ? input.theme.slice(0, 80) : undefined;
+      const item = input.id != null ? catalogItem(String(input.id)) : focalCandidate(theme, zone, useTown.getState().sceneMeta?.seed);
+      if (!item) return fail(input.id != null ? `Unknown catalog id "${String(input.id)}".` : "No landmark candidate found — pass id or a richer theme.");
+      const lot = searchClearLot({ col: zone.focal.col, row: zone.focal.row }, item, occupancyMap(), undefined, 3);
+      if (!lot) return fail(`No clear ground near ${zone.label}'s focal point. remove_piece something first.`);
+      beginWrite(`raising a landmark in ${zone.label}`, { lot, catalogId: item.id });
+      const outcome = agentPlaceOne({ item, lot, reason: "the centerpiece" });
+      await afterRender();
+      if (!outcome.ok) {
+        endWrite("couldn't raise the landmark");
+        return fail(outcome.why, { empty_nearby: outcome.empty_nearby });
+      }
+      endWrite(`raised ${phraseForCatalog(item.id, item.kind)} in ${zone.label}`);
+      return ok({
+        noticed: `focal point: ${outcome.piece.id} at ${outcome.piece.lot} in ${zone.label}`,
+        created: { id: outcome.piece.id, lot: outcome.piece.lot },
+      });
+    },
+  },
+  {
+    name: "validate_scene",
+    description:
+      "READ — the scene completeness score and the ONLY arbiter of done. Tool success ≠ scene success: a build is finished when this returns complete:true, not when your calls stop erroring. Runs the composition grammar as a checklist — architecture, zones, focal point, characters, populated zones, paths, connected elevation, grounding, density, and (when a theme is given) the zones that theme implies — and every failed check names the repair tool. Call after every significant build phase. Loop INSPECT (get_occupancy/get_scene) → validate_scene → repair (create_* / move_piece / remove_piece / place_piece) → validate_scene until complete. Never declare a scene finished without this passing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        theme: { type: "string", description: "What the scene is supposed to be. Defaults to the board's standing goal." },
+      },
+    },
+    annotations: { readOnlyHint: true },
+    execute: (input) => {
+      const state = useTown.getState();
+      const theme = (typeof input.theme === "string" && input.theme.trim()) || state.nudgeGoal || undefined;
+      const report = validateScene(state.environment, state.pieces, theme ?? undefined);
+      return okWide({
+        complete: report.complete,
+        completion: `${report.completion}%`,
+        checks: report.checks.map((c) => `${c.ok ? "✓" : "✗"} ${c.id}: ${c.note}${!c.ok && c.fix ? ` → ${c.fix}` : ""}`),
+        ...(report.missing.length ? { missing: report.missing } : {}),
+      });
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // Seed tools — every generated scene is a seeded procedural world. The AI
+  // never touches seed state directly; these are the only seed verbs.
+  // -------------------------------------------------------------------------
+  {
+    name: "get_scene_seed",
+    description:
+      "READ. The current scene's seed identity: seed, prompt, sceneType, generator version, createdAt, and the share_url that reproduces this exact world on any board (the URL encodes prompt + seed, never coordinates). Returns has_seed:false for authored/freeform boards — compose_scene mints one.",
+    inputSchema: { type: "object", properties: {} },
+    annotations: { readOnlyHint: true },
+    execute: () => {
+      const meta = useTown.getState().sceneMeta;
+      if (!meta) {
+        return ok({
+          has_seed: false,
+          note: "This board is authored/freeform — no procedural seed. compose_scene or plan_scene mints one.",
+        });
+      }
+      return ok({
+        has_seed: true,
+        seed: meta.seed,
+        prompt: meta.prompt,
+        scene_type: meta.sceneType,
+        generator_version: meta.version,
+        created_at: meta.createdAt,
+        share_url: sceneShareUrl(),
+        note: "Same prompt + same seed = the same world, reproducibly.",
+      });
+    },
+  },
+  {
+    name: "generate_scene_seed",
+    description:
+      "SEED. Mint a fresh unique scene seed (like MARKET-8F42KQ) WITHOUT building anything — use it in a later compose_scene/plan_scene call, or to offer the human a choice of worlds. Pass concept to flavor the prefix (e.g. 'market'). Seeds belong to scenes, never to users, and are never predictable.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        concept: { type: "string", description: "Optional concept word for the seed prefix, e.g. 'market' → MARKET-…" },
+      },
+    },
+    annotations: { readOnlyHint: true },
+    execute: (input) => {
+      const seed = generateSceneSeed(typeof input.concept === "string" ? input.concept : undefined);
+      return ok({ seed, note: "Pass this to compose_scene or plan_scene as {seed}." });
+    },
+  },
+  {
+    name: "set_scene_seed",
+    description:
+      "SEED. Import a specific seed (e.g. from a shared scene) as the board's scene identity. Pass seed and optional prompt (defaults to the current scene's prompt or the board's standing goal — required if neither exists). By default the world is REBUILT deterministically from that seed (pass rebuild:false to only stamp the identity). Same prompt + same seed = the same world another user shared.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        seed: { type: "string", description: "The seed to import, e.g. MARKET-8F42KQ." },
+        prompt: { type: "string", description: "The scene prompt the seed belongs to. Defaults to the current prompt / standing goal." },
+        rebuild: { type: "boolean", description: "Default true: rebuild the scene from this seed now." },
+      },
+      required: ["seed"],
+    },
+    execute: async (input) => {
+      if (!isValidSeed(input.seed)) {
+        return fail(`"${String(input.seed)}" is not a valid seed. Seeds look like MARKET-8F42KQ.`);
+      }
+      const seed = normalizeSeed(String(input.seed));
+      const state = useTown.getState();
+      const prompt =
+        (typeof input.prompt === "string" && input.prompt.trim().slice(0, 160)) ||
+        state.sceneMeta?.prompt ||
+        state.nudgeGoal ||
+        "";
+      if (!prompt) return fail("No prompt to pair with this seed. Pass prompt (the seed's scene description).");
+      if (input.rebuild === false) {
+        rememberScene(seed, prompt);
+        return ok({ noticed: `scene identity set: ${seed} (“${prompt}”) — not rebuilt`, seed, share_url: sceneShareUrl() });
+      }
+      beginWrite(`rebuilding from seed ${seed}`, null);
+      const { plan, placed, validation } = await buildScene(prompt, seed);
+      endWrite(`rebuilt ${seed} — ${placed} pieces`);
+      return okWide({
+        noticed: `rebuilt “${prompt}” from ${seed}: ${placed} pieces, ${validation.completion}% complete`,
+        seed: plan.seed,
+        fingerprint: fingerprint({ env: plan.env, todos: plan.todos }),
+        share_url: sceneShareUrl(),
+        validation: { completion: validation.completion, complete: validation.complete },
+      });
+    },
+  },
+  {
+    name: "regenerate_scene",
+    description:
+      "SEED — remix: mint a NEW seed and rebuild the same scene concept as a meaningfully different composition — different footprint, zone arrangement, asset picks, and detail; not the same world shuffled. Uses the current scene's prompt (or the board's standing goal). Human pieces are preserved. Returns the new seed and share_url; the old seed still reproduces the old world if anyone kept it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        prompt: { type: "string", description: "Optional new prompt; defaults to the current scene's prompt." },
+      },
+    },
+    execute: async (input) => {
+      const state = useTown.getState();
+      const prompt =
+        (typeof input.prompt === "string" && input.prompt.trim().slice(0, 160)) ||
+        state.sceneMeta?.prompt ||
+        state.nudgeGoal ||
+        "";
+      if (!prompt) return fail("Nothing to regenerate — no current scene prompt. Use compose_scene first.");
+      const previous = state.sceneMeta?.seed;
+      const seed = generateSceneSeed(prompt);
+      beginWrite(`remixing ${prompt}`, null);
+      const { plan, placed, validation } = await buildScene(prompt, seed);
+      endWrite(`remixed — ${seed}`);
+      return okWide({
+        noticed: `remixed “${prompt}”: ${previous ?? "unseeded"} → ${plan.seed} (${placed} pieces, ${validation.completion}% complete)`,
+        seed: plan.seed,
+        previous_seed: previous,
+        fingerprint: fingerprint({ env: plan.env, todos: plan.todos }),
+        share_url: sceneShareUrl(),
+        validation: { completion: validation.completion, complete: validation.complete },
+      });
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // World rules + themed terrain + bulk environment — the rule engine and
+  // material ecosystem, exposed as semantic verbs.
+  // -------------------------------------------------------------------------
+  {
+    name: "get_scene_rules",
+    description:
+      "READ. The world-building LAWS this application enforces — composition rules (what a scene must contain) and realism rules (what placements must respect) — plus the theme roster and the ground-material palette. validate_scene runs every applicable rule; the hard rules (stair approaches, walkways) are enforced at placement time and will refuse violating writes. Read this before building to operate inside the laws instead of discovering them by refusal.",
+    inputSchema: { type: "object", properties: {} },
+    annotations: { readOnlyHint: true },
+    execute: () =>
+      okWide({
+        rules: SCENE_RULES.map((r) => `[${r.kind}] ${r.id} — ${r.law}`),
+        themes: THEMES.map((t) => `${t.id}: ${t.label}`),
+        ground_materials: GROUND_MATERIALS,
+        note: "AI = intent, rules = validity, seed = variation, WebMCP = interface.",
+      }),
+  },
+  {
+    name: "create_vegetation",
+    description:
+      "SEMANTIC (bulk) — environmental planting in one call; never place trees one at a time. area: 'edge' rings the island's actual coastline with a dense seeded boundary (species, flips, and gaps varied; entrances/piers/roads left open) — THE tool for forest edges and environmental framing, and the repair for a bare-boundary validation failure. Or pass a zone id/type to plant inside that zone. Optional style (catalog flavor, e.g. 'pine trees rocks') and density (low|medium|high). Placements go through the same collision/lock/walkway rules as everything else.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        area: { type: "string", description: "'edge' for the coastline boundary, or a zone id/type from get_occupancy." },
+        style: { type: "string", description: "Optional catalog flavor, e.g. 'dead trees', 'palm trees rocks'." },
+        density: { type: "string", enum: ["low", "medium", "high"] },
+      },
+      required: ["area"],
+    },
+    execute: async (input) => {
+      const state = useTown.getState();
+      const env = state.environment;
+      if (!env) return fail("No environment yet. compose_scene or create_zone first.");
+      const themeSpec = themeById(env.themeId) ?? resolveTheme(state.sceneMeta?.prompt ?? "", "grass");
+      const seedBase = `${state.sceneMeta?.seed ?? "UNSEEDED"}-${Object.keys(state.pieces).length}`;
+      const style = typeof input.style === "string" ? input.style.slice(0, 60) : undefined;
+      const densityMap = { low: 0.3, medium: 0.5, high: 0.75 } as const;
+      const density = densityMap[String(input.density) as keyof typeof densityMap];
+      const area = String(input.area ?? "").trim().toLowerCase();
+      let specs: { item: CatalogItem; col: number; row: number; flip: boolean; reason: string }[] = [];
+      if (area === "edge") {
+        specs = planBoundary(landMaskFromEnv(env), themeSpec, seedBase, buildFrameSkip(env), {
+          density,
+          query: style,
+        });
+      } else {
+        const zone = env.zones.find((z) => z.id === area) ?? env.zones.find((z) => z.type === area);
+        if (!zone) return fail(`No zone "${area}". Use 'edge' or a zone from get_occupancy.`, { zones: env.zones.map((z) => `${z.id}:${z.type}`) });
+        const pool = boundaryPool(themeSpec, seedBase, style);
+        if (!pool.length) return fail("No vegetation matched that style. Try a broader style.");
+        const rng = createSeededRandom(deriveSeed(seedBase, `veg:${zone.id}`));
+        const target = density ?? 0.4;
+        for (let r = zone.rect.r0; r < zone.rect.r0 + zone.rect.d; r += 1) {
+          for (let c = zone.rect.c0; c < zone.rect.c0 + zone.rect.w; c += 1) {
+            if (rng() < target * 0.6) {
+              specs.push({
+                item: pool[Math.floor(rng() * pool.length)],
+                col: c,
+                row: r,
+                flip: rng() > 0.5,
+                reason: `growing in ${zone.label}`,
+              });
+            }
+          }
+        }
+      }
+      if (!specs.length) return fail("Nothing to plant there — the area may be fully framed already.");
+      beginWrite(area === "edge" ? "raising the boundary" : `planting ${area}`, null);
+      let placed = 0;
+      for (const spec of specs) {
+        const outcome = agentPlaceOne({ item: spec.item, lot: lotId(spec.col, spec.row), flip: spec.flip, reason: spec.reason });
+        if (outcome.ok) placed += 1;
+      }
+      await afterRender();
+      endWrite(`planted ${placed} pieces`);
+      return ok({
+        noticed: `${area === "edge" ? "boundary raised" : `planted ${area}`}: ${placed}/${specs.length} placed`,
+        placed,
+        skipped: specs.length - placed,
+      });
+    },
+  },
+  {
+    name: "create_ground_patch",
+    description:
+      "SEMANTIC — paint one themed ground patch: an intentional region of a different material, not noise. The repair for a too-uniform ground. Pass material (see get_scene_rules for the palette), optional near (zone id/type or lot id — defaults to the island center), and size (small|medium|large). Patches merge into the scene's material ecosystem and render as coherent voxel regions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        material: { type: "string", description: "A ground material, e.g. moss, dirt, cobble, snow, candy-pink." },
+        near: { type: "string", description: "Zone id/type or lot id to center the patch on." },
+        size: { type: "string", enum: ["small", "medium", "large"] },
+      },
+      required: ["material"],
+    },
+    execute: async (input) => {
+      const state = useTown.getState();
+      const env = state.environment;
+      if (!env) return fail("No environment yet. compose_scene or create_zone first.");
+      const material = String(input.material ?? "").trim() as PlatformMaterial;
+      if (!GROUND_MATERIALS.includes(material)) {
+        return fail(`Unknown material "${material}".`, { materials: GROUND_MATERIALS });
+      }
+      const island = landMaskFromEnv(env);
+      if (!island.cells.size) return fail("No ground to paint.");
+      const center =
+        (input.near != null ? resolvePoint(env, String(input.near)) : null) ?? {
+          col: island.bbox.c0 + Math.floor(island.bbox.w / 2),
+          row: island.bbox.r0 + Math.floor(island.bbox.d / 2),
+          label: "the center",
+        };
+      const radius = { small: 1.6, medium: 2.6, large: 3.6 }[String(input.size) as "small" | "medium" | "large"] ?? 2.6;
+      const rng = createSeededRandom(deriveSeed(`${state.sceneMeta?.seed ?? "UNSEEDED"}`, `patch:${material}:${center.col}:${center.row}:${env.ground?.length ?? 0}`));
+      const wobble = rng() * Math.PI * 2;
+      const merged = new Map<string, GroundCell>();
+      for (const g of env.ground ?? []) merged.set(cellKey(g.col, g.row), g);
+      let painted = 0;
+      for (let dr = -Math.ceil(radius); dr <= Math.ceil(radius); dr += 1) {
+        for (let dc = -Math.ceil(radius); dc <= Math.ceil(radius); dc += 1) {
+          const col = center.col + dc;
+          const row = center.row + dr;
+          if (!island.cells.has(cellKey(col, row))) continue;
+          const edge = radius * (0.8 + 0.25 * Math.sin(Math.atan2(dr, dc) * 2 + wobble));
+          if (Math.hypot(dc, dr) <= edge) {
+            merged.set(cellKey(col, row), { col, row, m: material });
+            painted += 1;
+          }
+        }
+      }
+      if (!painted) return fail("That patch would land entirely off the ground.");
+      useTown.getState().setEnvironment({ ...env, ground: [...merged.values()] });
+      await afterRender();
+      endWrite(`painted ${material} near ${center.label}`);
+      return ok({ noticed: `ground patch painted: ${painted} cells of ${material} near ${center.label}` });
+    },
+  },
+  {
+    name: "apply_theme",
+    description:
+      "SEMANTIC — restyle the whole environment with a theme's material ecosystem: repaints the ground platforms to the theme's primary, lays fresh seeded secondary/accent/rare patches, and sets the themed walk material. Pass theme (an id from get_scene_rules, or free text to resolve one, e.g. 'spooky graveyard'). Pieces are untouched — follow with create_vegetation {area:'edge'} if the boundary should change too.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        theme: { type: "string", description: "Theme id (e.g. spooky, candy, snow) or free text." },
+      },
+      required: ["theme"],
+    },
+    execute: async (input) => {
+      const state = useTown.getState();
+      const env = state.environment;
+      if (!env) return fail("No environment yet. compose_scene or create_zone first.");
+      const text = String(input.theme ?? "").trim();
+      const themeSpec = themeById(text.toLowerCase()) ?? resolveTheme(text, "grass");
+      const island = landMaskFromEnv(env);
+      if (!island.cells.size) return fail("No ground to restyle.");
+      const platforms = env.platforms.map((p) => {
+        if (p.inset || p.level !== 0 || p.material === "road" || p.id === "pier") return p;
+        return { ...p, material: themeSpec.primary };
+      });
+      useTown.getState().setEnvironment(
+        withWaterPaint(
+          {
+            ...env,
+            platforms,
+            ground: paintTerrain(island, themeSpec, state.sceneMeta?.seed ?? "UNSEEDED"),
+            themeId: themeSpec.id,
+            pathMaterial: themeSpec.pathMaterial,
+          },
+          state.sceneMeta?.seed ?? "UNSEEDED",
+        ),
+      );
+      await afterRender();
+      endWrite(`restyled as ${themeSpec.label}`);
+      return ok({
+        noticed: `theme applied: ${themeSpec.label} (${themeSpec.primary} ground, patches of ${[...themeSpec.secondary, ...themeSpec.accent].map((l) => l.m).join(", ")})`,
+        theme: themeSpec.id,
+      });
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -1195,28 +1863,73 @@ export async function registerTownTools(signal: AbortSignal): Promise<WebMcpSurf
   }
   if (framed) return null;
 
+  const tools = instrumentedTools();
+
   if (document.modelContext?.registerTool) {
-    for (const { name, description, inputSchema, execute, annotations } of TOWN_TOOLS) {
+    for (const { name, description, inputSchema, execute, annotations } of tools) {
       await document.modelContext.registerTool({ name, description, inputSchema, execute, annotations }, { signal });
     }
-    await document.modelContext.provideContext?.({ tools: TOWN_TOOLS });
+    await document.modelContext.provideContext?.({ tools });
     signal.addEventListener("abort", () => {
       void document.modelContext?.provideContext?.({ tools: [] });
     });
     return "document.modelContext";
   }
   if (navigator.modelContext?.registerTool) {
-    for (const { name, description, inputSchema, execute, annotations } of TOWN_TOOLS) {
+    for (const { name, description, inputSchema, execute, annotations } of tools) {
       await navigator.modelContext.registerTool({ name, description, inputSchema, execute, annotations }, { signal });
     }
-    await navigator.modelContext.provideContext?.({ tools: TOWN_TOOLS });
+    await navigator.modelContext.provideContext?.({ tools });
     return "navigator.modelContext";
   }
   if (document.modelContext?.provideContext) {
-    await document.modelContext.provideContext({ tools: TOWN_TOOLS });
+    await document.modelContext.provideContext({ tools });
     return "document.modelContext";
   }
   return null;
+}
+
+/**
+ * WebMCP lifecycle log — dev-only console line per call: tool, args, wall
+ * time, and a one-line result (or the error). Makes it obvious in DevTools
+ * whether an agent actually ran plan → compose → validate → repair, or just
+ * hammered primitives. The user-facing tally lives in the Agent Build panel.
+ */
+function logToolCall(name: string, input: Record<string, unknown>, ms: number, result?: ModelContextToolResult, err?: unknown) {
+  if (process.env.NODE_ENV === "production") return;
+  const args = JSON.stringify(input ?? {});
+  const argLine = args.length > 160 ? `${args.slice(0, 160)}…` : args;
+  if (err) {
+    console.warn(`[webmcp] ${name} ✗ ${ms.toFixed(0)}ms`, argLine, err);
+    return;
+  }
+  const text = result?.content?.[0]?.text ?? "";
+  const summary = typeof text === "string" && text.length > 140 ? `${text.slice(0, 140)}…` : text;
+  console.debug(`[webmcp] ${name} ${result?.isError ? "✗" : "✓"} ${ms.toFixed(0)}ms`, argLine, summary);
+}
+
+async function runInstrumented(
+  tool: ModelContextTool,
+  input: Record<string, unknown>,
+): Promise<ModelContextToolResult> {
+  useTown.getState().recordToolCall(tool.name);
+  const t0 = performance.now();
+  try {
+    const result = await tool.execute(input);
+    logToolCall(tool.name, input, performance.now() - t0, result);
+    return result;
+  } catch (err) {
+    logToolCall(tool.name, input, performance.now() - t0, undefined, err);
+    throw err;
+  }
+}
+
+/** Same tool list the host sees, with the call counter + lifecycle log. */
+function instrumentedTools() {
+  return TOWN_TOOLS.map((tool) => ({
+    ...tool,
+    execute: (input: Record<string, unknown>) => runInstrumented(tool, input),
+  }));
 }
 
 /** Dev/test harness — lets a console (or a test driver) call the same executes. */
@@ -1226,7 +1939,7 @@ export async function callTownTool(
 ): Promise<ModelContextToolResult> {
   const tool = TOWN_TOOLS.find((t) => t.name === name);
   if (!tool) return fail(`No tool named "${name}".`);
-  return tool.execute(input);
+  return runInstrumented(tool, input);
 }
 
 export { CATALOG, FEATURED };

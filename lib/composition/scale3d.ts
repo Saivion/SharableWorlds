@@ -117,6 +117,10 @@ const BULKY_KINDS = new Set<CatalogKind>([
  */
 export function clearanceLots(item: CatalogItem): number {
   const { footprint } = modelScale(item);
+  // People and pets render wide (spread arms, chunky bodies): a 1-lot pair
+  // interpenetrates and reads as stacked. The floor keeps neighbors at a
+  // diagonal or further — close company, never a pile.
+  if (item.kind === "character" || item.kind === "pet") return Math.max(0.55, footprint * 0.5);
   if (TIGHT_KINDS.has(item.kind)) return Math.max(0.32, footprint * 0.42);
   if (item.kind === "tree") return Math.max(0.78, footprint * 0.5 + 0.28);
   const bulky =

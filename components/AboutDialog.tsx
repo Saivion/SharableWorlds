@@ -143,8 +143,9 @@ export function AboutDialog({ open, closing, onClose }: Props) {
             paint is locked against the agent.
           </p>
           <p className="about-body">
-            Set a Nudge to give it a standing goal. In a WebMCP-enabled browser
-            it reads the map, plans, and fills the empty lots around yours.
+            Tap Surprise Me to hand it a standing goal. In a WebMCP-enabled
+            browser it reads the map, plans, and fills the empty lots around
+            yours.
           </p>
           <button type="button" className="about-start" onClick={onClose}>
             Start building

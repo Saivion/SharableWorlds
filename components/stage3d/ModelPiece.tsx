@@ -21,6 +21,21 @@ type Normalized = {
   offset: THREE.Vector3;
 };
 
+/** Shared look pass for catalog materials — cloned pieces and instanced
+ * groups must patch identically or the same model reads differently. */
+export function patchPieceMaterial(m: THREE.Material): THREE.Material {
+  // DoubleSide keeps mirrored (flip) pieces from rendering inside-out.
+  m.side = THREE.DoubleSide;
+  if ("envMapIntensity" in m) {
+    (m as THREE.MeshStandardMaterial).envMapIntensity = 0.55;
+  }
+  if ("roughness" in m) {
+    const std = m as THREE.MeshStandardMaterial;
+    if (typeof std.roughness === "number" && std.roughness > 0.9) std.roughness = 0.72;
+  }
+  return m;
+}
+
 function useNormalizedModel(item: CatalogItem, ghost: boolean): Normalized {
   const gltf = useGLTF(item.model ?? "/assets/kenney/models/missing.glb");
   return useMemo(() => {
@@ -31,18 +46,7 @@ function useNormalizedModel(item: CatalogItem, ghost: boolean): Normalized {
       if (child instanceof THREE.Mesh) {
         child.castShadow = !ghost;
         child.receiveShadow = !ghost;
-        const patch = (m: THREE.Material) => {
-          // DoubleSide keeps mirrored (flip) pieces from rendering inside-out.
-          m.side = THREE.DoubleSide;
-          if ("envMapIntensity" in m) {
-            (m as THREE.MeshStandardMaterial).envMapIntensity = 0.55;
-          }
-          if ("roughness" in m) {
-            const std = m as THREE.MeshStandardMaterial;
-            if (typeof std.roughness === "number" && std.roughness > 0.9) std.roughness = 0.72;
-          }
-          return m;
-        };
+        const patch = patchPieceMaterial;
         if (ghost) {
           // Ghosts get their own translucent material clones — the source
           // materials are shared across every instance of this model.
@@ -73,13 +77,17 @@ function useNormalizedModel(item: CatalogItem, ghost: boolean): Normalized {
 function GrowIn({ children }: { children: React.ReactNode }) {
   const ref = useRef<THREE.Group>(null);
   const born = useRef<number | null>(null);
+  const done = useRef(false);
   useFrame(({ clock }) => {
-    if (!ref.current) return;
+    // Settled pieces must cost nothing — a scene keeps every piece mounted,
+    // so a callback that never finishes accumulates one per placement.
+    if (done.current || !ref.current) return;
     if (born.current == null) born.current = clock.elapsedTime;
     const t = Math.min(1, (clock.elapsedTime - born.current) / 0.22);
     const e = 1 - Math.pow(1 - t, 3);
     const s = 0.6 + 0.4 * e;
     ref.current.scale.setScalar(s);
+    if (t >= 1) done.current = true;
   });
   return <group ref={ref} scale={0.6}>{children}</group>;
 }

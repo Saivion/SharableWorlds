@@ -2,7 +2,23 @@ import type { CatalogItem, CatalogKind } from "../catalog";
 import { lotIdOf, rectCenter, rectContains, type LotRect } from "./grid3d";
 import { roleOf, visualMass, type Role } from "./roles";
 import { bodiesOverlap, clearanceLots } from "./scale3d";
-import { hashTheme, selectItems } from "./select";
+import {
+  coastColInRow,
+  findZoneRect,
+  generateHarborWaterMask,
+  generateIslandMask,
+  largestRectInMask,
+  maskHas,
+  maskToRects,
+  pushWaterMask,
+  southCoastRow,
+  type HarborSide,
+} from "./island";
+import { createSeededRandom, deriveSeed, generateSceneSeed, isValidSeed, normalizeSeed } from "./seed";
+import { selectItems } from "./select";
+import { paintTerrain, planBoundary, withWaterPaint } from "./terrain";
+import { resolveTheme } from "./themes";
+import { cellKey } from "./island";
 import type { EnvironmentSpec, PathSpec, PlatformMaterial, ZoneSpec, ZoneType } from "./types";
 
 export type OccupiedBody = { col: number; row: number; r: number };
@@ -34,7 +50,7 @@ export type SceneTodo = {
   reason: string;
 };
 
-export type ComposedPlan = { env: EnvironmentSpec; todos: SceneTodo[] };
+export type ComposedPlan = { env: EnvironmentSpec; todos: SceneTodo[]; seed: string };
 
 const ORIGIN = { col: 12, row: 12 }; // M13 — the home window's center
 
@@ -144,14 +160,16 @@ const INTERIOR_BY_KIND: Partial<Record<CatalogKind, { type: ZoneType; label: str
   space: { type: "lab", label: "the station" },
 };
 
-function planZones(byRole: Record<Role, CatalogItem[]>): {
+export type ZoneProgram = {
   interior: ZonePlan | null;
   market: boolean;
   garden: boolean;
   harbor: boolean;
   street: boolean;
   skyline: boolean;
-} {
+};
+
+export function planZones(byRole: Record<Role, CatalogItem[]>): ZoneProgram {
   const interiorCounts = new Map<CatalogKind, number>();
   for (const item of byRole.structure) {
     const plan = INTERIOR_BY_KIND[item.kind];
@@ -188,63 +206,23 @@ function mainMaterial(items: CatalogItem[]): PlatformMaterial {
   return "grass";
 }
 
-function makeRng(seed: number) {
-  let s = (seed >>> 0) || 1;
-  return () => {
-    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
-    return s / 4294967296;
-  };
-}
-
 type Corner = "nw" | "ne" | "sw";
-type HarborSide = "e" | "s" | "w";
-
-function interiorSpot(corner: Corner, main: LotRect, w: number, d: number): LotRect {
-  const c0 = corner === "ne" ? main.c0 + main.w - w - 1 : main.c0 + 1;
-  const r0 = corner === "sw" ? main.r0 + main.d - d - 1 : main.r0 + 1;
-  return { c0, r0, w, d };
-}
-
-function gardenSpot(corner: Corner, main: LotRect, w: number, d: number): LotRect {
-  if (corner === "ne") return { c0: main.c0 + 1, r0: main.r0 + main.d - d - 1, w, d };
-  if (corner === "sw") return { c0: main.c0 + main.w - w - 1, r0: main.r0 + 1, w, d };
-  return { c0: main.c0 + 1, r0: main.r0 + main.d - d - 1, w, d };
-}
-
-function harborLayout(side: HarborSide, main: LotRect, vessels: number) {
-  const span = 5 + Math.ceil(vessels / 2) * 3;
-  if (side === "s") {
-    const d = Math.min(8, span);
-    const pierC = main.c0 + Math.floor(main.w / 2);
-    return {
-      water: { c0: main.c0 - 1, r0: main.r0 + main.d, w: main.w + 2, d } satisfies LotRect,
-      pier: { c0: pierC, r0: main.r0 + main.d, w: 1, d: 2 } satisfies LotRect,
-      focal: { col: pierC, row: main.r0 + main.d + 3 },
-    };
-  }
-  if (side === "w") {
-    const pierR = main.r0 + Math.floor(main.d / 2);
-    return {
-      water: { c0: main.c0 - span, r0: main.r0 - 1, w: span, d: main.d + 2 } satisfies LotRect,
-      pier: { c0: main.c0 - 2, r0: pierR, w: 2, d: 1 } satisfies LotRect,
-      focal: { col: main.c0 - 3, row: pierR },
-    };
-  }
-  const pierR = main.r0 + Math.floor(main.d / 2);
-  return {
-    water: { c0: main.c0 + main.w, r0: main.r0 - 1, w: span, d: main.d + 2 } satisfies LotRect,
-    pier: { c0: main.c0 + main.w, r0: pierR, w: 2, d: 1 } satisfies LotRect,
-    focal: { col: main.c0 + main.w + 3, row: pierR },
-  };
-}
-
 // ---------------------------------------------------------------------------
 // The composer
 // ---------------------------------------------------------------------------
 
-export function composeScenePlan(theme: string, occupied: Iterable<OccupiedBody> = []): ComposedPlan {
-  const seed = hashTheme(theme.trim().toLowerCase() || "scene");
-  const items = selectItems(theme, seed);
+export function composeScenePlan(
+  theme: string,
+  occupied: Iterable<OccupiedBody> = [],
+  sceneSeed?: string,
+): ComposedPlan {
+  // The scene seed is the ONLY source of variation. Same prompt + same seed
+  // = same world; a fresh seed is minted when none is given (a new scene).
+  const seedStr = sceneSeed && isValidSeed(sceneSeed) ? normalizeSeed(sceneSeed) : generateSceneSeed(theme);
+  // One derived seed per subsystem: reselecting decoration must never
+  // reshuffle the architecture, and vice versa.
+  const items = selectItems(theme, deriveSeed(seedStr, "selection"));
+  const propSeed = deriveSeed(seedStr, "props");
 
   const byRole: Record<Role, CatalogItem[]> = {
     ground: [], wall: [], connector: [], structure: [], backdrop: [],
@@ -254,169 +232,228 @@ export function composeScenePlan(theme: string, occupied: Iterable<OccupiedBody>
   const structures = [...byRole.structure].sort((a, b) => visualMass(b) - visualMass(a));
 
   const zonePlan = planZones(byRole);
-  const rng = makeRng(seed);
+  const rng = createSeededRandom(deriveSeed(seedStr, "layout"));
   const extraZones =
     (zonePlan.interior ? 1 : 0) + (zonePlan.market ? 1 : 0) + (zonePlan.garden ? 1 : 0) +
     (zonePlan.harbor ? 1 : 0) + (zonePlan.street ? 1 : 0);
 
-  // --- Footprint: size, aspect, and wings vary with the seed so two
-  // living-room themes don't stamp the same rectangle. -------------------
+  // --- Footprint: a seeded ORGANIC island, never a plain slab. -------------
+  // Harmonic coastlines, seeded lobes, and a rotation mean every seed owns a
+  // silhouette of its own; the mask decomposes into strips so all rect-based
+  // consumers (deck voxels, grounding, fencing) stay exact.
   const tall = rng() > 0.45;
-  const mainW = Math.min(16, (tall ? 10 : 12) + extraZones + Math.floor(rng() * 3));
-  const mainD = Math.min(14, (tall ? 12 : 8) + Math.floor(extraZones / 2) + Math.floor(rng() * 3));
-  const shiftC = Math.floor(rng() * 5) - 2;
-  const shiftR = Math.floor(rng() * 3) - 1;
-  const c0 = ORIGIN.col - Math.floor(mainW / 2) + shiftC;
-  const r0 = ORIGIN.row - Math.floor(mainD / 2) + shiftR;
-  const main: LotRect = { c0, r0, w: mainW, d: mainD };
-  const material = mainMaterial(items);
-  const shape = Math.floor(rng() * 4); // 0 rect, 1 east wing, 2 south apron, 3 pocket
+  const spanW = Math.min(17, (tall ? 11 : 13) + extraZones + Math.floor(rng() * 3));
+  const spanD = Math.min(15, (tall ? 13 : 9) + Math.floor(extraZones / 2) + Math.floor(rng() * 3));
+  const center = {
+    col: ORIGIN.col + Math.floor(rng() * 5) - 2,
+    row: ORIGIN.row + Math.floor(rng() * 3) - 1,
+  };
+  const island = generateIslandMask(rng, center, spanW / 2, spanD / 2);
+  const main = island.bbox;
+  const { c0, r0, w: mainW, d: mainD } = main;
+  // The prompt summons a THEME — a whole material ecosystem, not a texture.
+  const themeSpec = resolveTheme(theme, mainMaterial(items));
+  const material = themeSpec.primary;
   const corner: Corner = (["nw", "ne", "sw"] as const)[Math.floor(rng() * 3)];
   const harborSide: HarborSide = (["e", "s", "w"] as const)[Math.floor(rng() * 3)];
+  // The biggest rectangle the coastline allows — zones and the focal live here.
+  const core = largestRectInMask(island);
 
   const env: EnvironmentSpec = {
-    platforms: [{ id: "main", rect: main, level: 0, material }],
+    platforms: maskToRects(island).map((rect, i) => ({ id: `main-${i}`, rect, level: 0, material })),
     walls: [],
     stairs: [],
     paths: [],
     water: [],
     zones: [],
+    themeId: themeSpec.id,
+    pathMaterial: themeSpec.pathMaterial,
+    // Intentional material patches — the ground is an ecosystem, not a tile.
+    ground: paintTerrain(island, themeSpec, seedStr),
   };
   const board = new Board(occupied);
   const placements: Placement[] = [];
   const zones: ZoneSpec[] = [];
+  const zoneRects: LotRect[] = [];
 
-  if (shape === 1 && !zonePlan.harbor) {
-    env.platforms.push({
-      id: "wing",
-      rect: { c0: c0 + mainW, r0: r0 + Math.floor(mainD * 0.25), w: 3 + Math.floor(rng() * 3), d: Math.max(4, Math.floor(mainD * 0.55)) },
-      level: 0,
-      material,
-    });
-  }
-  if (shape === 2 && !zonePlan.street) {
-    env.platforms.push({
-      id: "apron",
-      rect: { c0: c0 + 1, r0: r0 + mainD, w: mainW - 2, d: 2 + Math.floor(rng() * 2) },
-      level: 0,
-      material,
-    });
-  }
+  const biasFor = (which: Corner | "se") =>
+    which === "ne"
+      ? { col: c0 + mainW - 2, row: r0 + 1 }
+      : which === "sw"
+        ? { col: c0 + 1, row: r0 + mainD - 2 }
+        : which === "se"
+          ? { col: c0 + mainW - 2, row: r0 + mainD - 2 }
+          : { col: c0 + 1, row: r0 + 1 };
 
-  // --- Interior: a raised, walled room — corner chosen by seed -------------
+  // --- Interior: a raised, walled room wherever the coastline allows -------
   let interiorRect: LotRect | null = null;
   if (zonePlan.interior) {
-    const w = Math.min(4 + Math.floor(rng() * 3), mainW - 5);
-    const d = Math.min(3 + Math.floor(rng() * 2), mainD - 4);
-    interiorRect = interiorSpot(corner, main, Math.max(3, w), Math.max(3, d));
-    env.platforms.push({
-      id: "terrace",
-      rect: interiorRect,
-      level: 1,
-      material: zonePlan.interior.type === "home" ? "wood" : "tile",
-    });
-    env.walls.push(
-      { id: "terrace-n", c: interiorRect.c0, r: interiorRect.r0, len: interiorRect.w, dir: "h", side: "n", height: 1.7 },
-      { id: "terrace-w", c: interiorRect.c0, r: interiorRect.r0, len: interiorRect.d, dir: "v", side: "w", height: 1.7 },
-    );
-    if (corner === "sw") {
-      const stairCol = interiorRect.c0 + Math.floor(interiorRect.w / 2);
-      const stairRow = interiorRect.r0 - 1;
-      env.stairs.push({ id: "terrace-stair", at: { col: stairCol, row: stairRow }, dir: "s", fromLevel: 0, toLevel: 1 });
-      board.taken.add(key(stairCol, stairRow));
-    } else {
-      const stairCol = interiorRect.c0 + Math.floor(interiorRect.w / 2);
-      const stairRow = interiorRect.r0 + interiorRect.d;
-      env.stairs.push({ id: "terrace-stair", at: { col: stairCol, row: stairRow }, dir: "n", fromLevel: 0, toLevel: 1 });
-      board.taken.add(key(stairCol, stairRow));
+    const w = Math.max(3, Math.min(4 + Math.floor(rng() * 3), core.w - 1));
+    const d = Math.max(3, Math.min(3 + Math.floor(rng() * 2), core.d - 1));
+    interiorRect = findZoneRect(island, zoneRects, w, d, biasFor(corner));
+    if (interiorRect) {
+      zoneRects.push(interiorRect);
+      env.platforms.push({
+        id: "terrace",
+        rect: interiorRect,
+        level: 1,
+        material: zonePlan.interior.type === "home" ? "wood" : "tile",
+      });
+      env.walls.push(
+        { id: "terrace-n", c: interiorRect.c0, r: interiorRect.r0, len: interiorRect.w, dir: "h", side: "n", height: 1.7 },
+        { id: "terrace-w", c: interiorRect.c0, r: interiorRect.r0, len: interiorRect.d, dir: "v", side: "w", height: 1.7 },
+      );
+      // The stair lands on the first coast-approved side: south (open), east
+      // (unwalled), then north.
+      const midC = interiorRect.c0 + Math.floor(interiorRect.w / 2);
+      const midR = interiorRect.r0 + Math.floor(interiorRect.d / 2);
+      const stairSpots = [
+        { at: { col: midC, row: interiorRect.r0 + interiorRect.d }, dir: "n" as const },
+        { at: { col: interiorRect.c0 + interiorRect.w, row: midR }, dir: "w" as const },
+        { at: { col: midC, row: interiorRect.r0 - 1 }, dir: "s" as const },
+      ];
+      const stair = stairSpots.find((s) => maskHas(island, s.at.col, s.at.row));
+      if (stair) {
+        env.stairs.push({ id: "terrace-stair", at: stair.at, dir: stair.dir, fromLevel: 0, toLevel: 1 });
+        board.taken.add(key(stair.at.col, stair.at.row));
+      }
+      zones.push({
+        id: "interior",
+        type: zonePlan.interior.type,
+        label: zonePlan.interior.label,
+        rect: interiorRect,
+        level: 1,
+        focal: rectCenter(interiorRect),
+      });
     }
-    zones.push({
-      id: "interior",
-      type: zonePlan.interior.type,
-      label: zonePlan.interior.label,
-      rect: interiorRect,
-      level: 1,
-      focal: rectCenter(interiorRect),
-    });
   }
 
-  // --- Market: a strip on the east or west, not always the same aisle ------
+  // --- Market: an aisle strip seated on the mask ---------------------------
   let marketRect: LotRect | null = null;
   if (zonePlan.market) {
     const west = corner === "ne" || (corner !== "nw" && rng() > 0.5);
-    marketRect = west
-      ? { c0: c0 + 1, r0: r0 + 2, w: 3, d: Math.min(6, mainD - 4) }
-      : { c0: c0 + mainW - 4, r0: r0 + 2, w: 3, d: Math.min(6, mainD - 4) };
-    zones.push({
-      id: "market",
-      type: "market",
-      label: "the market row",
-      rect: marketRect,
-      level: 0,
-      focal: rectCenter(marketRect),
-    });
+    const bias = { col: west ? c0 + 1 : c0 + mainW - 2, row: r0 + Math.floor(mainD / 2) };
+    marketRect = findZoneRect(island, zoneRects, 3, Math.min(6, Math.max(4, core.d - 1)), bias);
+    if (marketRect) {
+      zoneRects.push(marketRect);
+      zones.push({
+        id: "market",
+        type: "market",
+        label: "the market row",
+        rect: marketRect,
+        level: 0,
+        focal: rectCenter(marketRect),
+      });
+    }
   }
 
   // --- Garden: opposite the interior so the two rooms don't stack ----------
   let gardenRect: LotRect | null = null;
   if (zonePlan.garden) {
-    const gw = Math.min(3 + Math.floor(rng() * 3), mainW - 6);
-    const gd = Math.min(3 + Math.floor(rng() * 2), 5);
-    gardenRect = gardenSpot(interiorRect ? corner : "nw", main, Math.max(3, gw), Math.max(3, gd));
-    if (material !== "grass") {
-      env.platforms.push({ id: "garden-bed", rect: gardenRect, level: 0, material: "grass", inset: true });
+    const gw = Math.max(3, Math.min(3 + Math.floor(rng() * 3), core.w - 1));
+    const gd = Math.max(3, Math.min(3 + Math.floor(rng() * 2), 5));
+    const opposite: Corner | "se" = corner === "nw" ? "se" : corner === "ne" ? "sw" : "ne";
+    gardenRect = findZoneRect(island, zoneRects, gw, gd, biasFor(interiorRect ? opposite : "sw"));
+    if (gardenRect) {
+      zoneRects.push(gardenRect);
+      const bedMaterial =
+        themeSpec.id === "candy" ? "candy-mint"
+        : themeSpec.id === "snow" ? "grass-dark"
+        : themeSpec.id === "spooky" ? "grass-dry"
+        : themeSpec.id === "volcanic" || themeSpec.id === "dungeon" ? "moss"
+        : "grass";
+      if (material !== bedMaterial) {
+        env.platforms.push({ id: "garden-bed", rect: gardenRect, level: 0, material: bedMaterial, inset: true });
+      }
+      zones.push({
+        id: "garden",
+        type: "garden",
+        label: "the garden",
+        rect: gardenRect,
+        level: 0,
+        focal: rectCenter(gardenRect),
+      });
     }
-    zones.push({
-      id: "garden",
-      type: "garden",
-      label: "the garden",
-      rect: gardenRect,
-      level: 0,
-      focal: rectCenter(gardenRect),
-    });
   }
 
-  if (shape === 3 && !gardenRect) {
-    env.platforms.push({
-      id: "pocket",
-      rect: { c0: c0 + mainW - 5, r0: r0 + mainD - 4, w: 4, d: 3 },
-      level: 0,
-      material: material === "grass" ? "sand" : "grass",
-    });
-  }
-
-  // --- Harbor: water on a seeded shore, not always east --------------------
+  // --- Harbor: water hugging the actual coastline, pier from the coast -----
   byRole.vessel = [...byRole.vessel].sort((a, b) => visualMass(b) - visualMass(a)).slice(0, 6);
   if (zonePlan.harbor) {
-    const harbor = harborLayout(harborSide, main, byRole.vessel.length);
-    env.water.push({ id: "harbor-water", rect: harbor.water, level: 0 });
-    env.platforms.push({ id: "pier", rect: harbor.pier, level: 0, material: "wood" });
+    const span = 5 + Math.ceil(byRole.vessel.length / 2) * 3;
+    const depth = Math.min(8, span) + 2;
+    let pier: LotRect;
+    let harborFocal: { col: number; row: number };
+    if (harborSide === "s") {
+      const pierCol = center.col;
+      const coastRow = southCoastRow(island, pierCol) ?? r0 + mainD - 1;
+      pier = { c0: pierCol, r0: coastRow + 1, w: 1, d: 2 };
+      harborFocal = { col: pierCol, row: coastRow + 3 };
+    } else if (harborSide === "w") {
+      const pierRow = center.row;
+      const coastCol = coastColInRow(island, pierRow, "w") ?? c0;
+      pier = { c0: coastCol - 2, r0: pierRow, w: 2, d: 1 };
+      harborFocal = { col: coastCol - 3, row: pierRow };
+    } else {
+      const pierRow = center.row;
+      const coastCol = coastColInRow(island, pierRow, "e") ?? c0 + mainW - 1;
+      pier = { c0: coastCol + 1, r0: pierRow, w: 2, d: 1 };
+      harborFocal = { col: coastCol + 4, row: pierRow };
+    }
+    const waterMask = generateHarborWaterMask(island, harborSide, rng, depth);
+    pushWaterMask(env.water, waterMask, "harbor-water", 0);
+    env.platforms.push({ id: "pier", rect: pier, level: 0, material: "wood" });
     zones.push({
       id: "harbor",
       type: "harbor",
       label: "the harbor",
-      rect: harbor.water,
+      rect: waterMask.bbox,
       level: 0,
-      focal: harbor.focal,
+      focal: harborFocal,
     });
   }
 
-  // --- Street: south apron, or an east slip when the seed says so ----------
+  // --- Street: a road shoulder hugging the southern coast ------------------
   let streetRect: LotRect | null = null;
   if (zonePlan.street) {
-    const eastSlip = rng() > 0.55 && harborSide !== "e";
-    streetRect = eastSlip
-      ? { c0: c0 + mainW, r0, w: 2, d: mainD }
-      : { c0, r0: r0 + mainD, w: mainW, d: 2 };
-    env.platforms.push({ id: "road", rect: streetRect, level: 0, material: "road" });
-    zones.push({
-      id: "street",
-      type: "street",
-      label: "the street",
-      rect: streetRect,
-      level: 0,
-      focal: rectCenter(streetRect),
-    });
+    // Find the deepest southern coastline and the longest run that touches it.
+    let anchorRow = -Infinity;
+    const southRows = new Map<number, number>();
+    for (let col = c0; col < c0 + mainW; col += 1) {
+      const row = southCoastRow(island, col);
+      if (row != null) {
+        southRows.set(col, row);
+        if (row > anchorRow) anchorRow = row;
+      }
+    }
+    let runStart = c0;
+    let runLen = 0;
+    let bestStart = c0;
+    let bestLen = 0;
+    for (let col = c0; col < c0 + mainW; col += 1) {
+      const row = southRows.get(col);
+      if (row != null && row >= anchorRow - 1) {
+        if (runLen === 0) runStart = col;
+        runLen += 1;
+        if (runLen > bestLen) {
+          bestLen = runLen;
+          bestStart = runStart;
+        }
+      } else {
+        runLen = 0;
+      }
+    }
+    if (bestLen >= 4 && Number.isFinite(anchorRow)) {
+      streetRect = { c0: bestStart, r0: anchorRow + 1, w: bestLen, d: 2 };
+      env.platforms.push({ id: "road", rect: streetRect, level: 0, material: "road" });
+      zones.push({
+        id: "street",
+        type: "street",
+        label: "the street",
+        rect: streetRect,
+        level: 0,
+        focal: rectCenter(streetRect),
+      });
+    }
   }
 
   // --- Skyline: a raised shelf along the far (north) edge, width varies ----
@@ -424,7 +461,7 @@ export function composeScenePlan(theme: string, occupied: Iterable<OccupiedBody>
   if (zonePlan.skyline) {
     const inset = 1 + Math.floor(rng() * 3);
     skylineRect = { c0: c0 + inset, r0: r0 - 2 - Math.floor(rng() * 2), w: Math.max(4, mainW - inset * 2), d: 2 };
-    env.platforms.push({ id: "rise", rect: skylineRect, level: 1, material: material === "sand" ? "sand" : "grass" });
+    env.platforms.push({ id: "rise", rect: skylineRect, level: 1, material });
     zones.push({
       id: "skyline",
       type: "skyline",
@@ -435,19 +472,22 @@ export function composeScenePlan(theme: string, occupied: Iterable<OccupiedBody>
     });
   }
 
-  // --- Plaza: leftover, focal offset so the landmark isn't always dead center
+  // --- Plaza: the core clearing; focal offset so it's never dead center ----
   const focal = {
-    col: Math.round(c0 + mainW * (0.35 + rng() * 0.3)),
-    row: Math.round(r0 + mainD * (0.35 + rng() * 0.3)),
+    col: Math.min(core.c0 + core.w - 2, Math.max(core.c0 + 1, core.c0 + Math.round(core.w * (0.3 + rng() * 0.4)))),
+    row: Math.min(core.r0 + core.d - 2, Math.max(core.r0 + 1, core.r0 + Math.round(core.d * (0.3 + rng() * 0.4)))),
   };
-  const plazaRect: LotRect = { c0: c0 + 1, r0: r0 + 1, w: mainW - 2, d: mainD - 2 };
+  const plazaRect: LotRect = core;
   zones.push({ id: "plaza", type: "plaza", label: "the square", rect: plazaRect, level: 0, focal });
   env.zones = zones;
 
-  // --- Paths: entrance to focal, stair to focal ----------------------------
+  // --- Paths: coast entrance to focal, stair to focal — on land only -------
   const paths: PathSpec[] = [];
+  const entranceStart = southCoastRow(island, focal.col) ?? r0 + mainD - 1;
   const pathCells: { col: number; row: number }[] = [];
-  for (let r = r0 + mainD - 1; r >= focal.row; r -= 1) pathCells.push({ col: focal.col, row: r });
+  for (let r = entranceStart; r >= focal.row; r -= 1) {
+    if (maskHas(island, focal.col, r)) pathCells.push({ col: focal.col, row: r });
+  }
   paths.push({ id: "entrance", cells: pathCells });
   if (env.stairs.length) {
     const stair = env.stairs[0];
@@ -458,7 +498,7 @@ export function composeScenePlan(theme: string, occupied: Iterable<OccupiedBody>
       cells.push({ col: focal.col, row: rCur });
       if (rCur === focal.row) break;
     }
-    paths.push({ id: "stair-walk", cells });
+    paths.push({ id: "stair-walk", cells: cells.filter((cell) => maskHas(island, cell.col, cell.row)) });
   }
   env.paths = paths;
   for (const path of paths) {
@@ -505,6 +545,54 @@ export function composeScenePlan(theme: string, occupied: Iterable<OccupiedBody>
     return true;
   };
 
+  // --- Environmental framing: the boundary comes BEFORE the props ----------
+  // A dense, seeded ring on the actual coastline (forest edge, standing
+  // stones) with deliberate gaps: the entrance, the pier, the street, and
+  // anywhere the water meets the shore.
+  {
+    const frameSkip = new Set<string>();
+    for (const path of env.paths) {
+      for (const cell of path.cells) {
+        for (let dc = -1; dc <= 1; dc += 1) {
+          for (let dr = -1; dr <= 1; dr += 1) {
+            frameSkip.add(cellKey(cell.col + dc, cell.row + dr));
+          }
+        }
+      }
+    }
+    for (const p of env.platforms) {
+      if (p.id === "pier" || p.material === "road") {
+        for (let r = p.rect.r0 - 1; r <= p.rect.r0 + p.rect.d; r += 1) {
+          for (let c = p.rect.c0 - 1; c <= p.rect.c0 + p.rect.w; c += 1) {
+            frameSkip.add(cellKey(c, r));
+          }
+        }
+      }
+    }
+    for (const w of env.water) {
+      for (let r = w.rect.r0 - 1; r <= w.rect.r0 + w.rect.d; r += 1) {
+        for (let c = w.rect.c0 - 1; c <= w.rect.c0 + w.rect.w; c += 1) {
+          frameSkip.add(cellKey(c, r));
+        }
+      }
+    }
+    for (const s of env.stairs) frameSkip.add(cellKey(s.at.col, s.at.row));
+    // Functional zones stay grove-free — no tree in the market aisle or on
+    // the terrace floor. The plaza and garden may take a little spill.
+    const NO_GROVE: ZoneType[] = ["home", "arcade", "keep", "lab", "market"];
+    for (const zone of zones) {
+      if (!NO_GROVE.includes(zone.type)) continue;
+      for (let r = zone.rect.r0; r < zone.rect.r0 + zone.rect.d; r += 1) {
+        for (let c = zone.rect.c0; c < zone.rect.c0 + zone.rect.w; c += 1) {
+          frameSkip.add(cellKey(c, r));
+        }
+      }
+    }
+    for (const p of planBoundary(island, themeSpec, seedStr, frameSkip)) {
+      place(p.item, p.col, p.row, p.reason, { ring: 0, tight: true, allowSoft: true, flip: p.flip });
+    }
+  }
+
   let landmark: CatalogItem | undefined = structures[0];
   const support = structures.slice(1);
   if (!landmark) {
@@ -525,7 +613,12 @@ export function composeScenePlan(theme: string, occupied: Iterable<OccupiedBody>
   const interiorItems = zonePlan.interior
     ? support.filter((i) => INTERIOR_BY_KIND[i.kind]?.type === zonePlan.interior?.type)
     : [];
-  const marketStalls = marketRect ? support.filter((i) => i.kind === "stall") : [];
+  // Shop fixtures belong in the market row — machines (freezers, registers,
+  // vending) read as scattered appliances anywhere else. An arcade interior
+  // has first claim on its machines.
+  const marketStalls = marketRect
+    ? support.filter((i) => !interiorItems.includes(i) && (i.kind === "stall" || i.kind === "machine"))
+    : [];
   const plazaSupport = support.filter((i) => !interiorItems.includes(i) && !marketStalls.includes(i)).slice(0, 6);
   if (interiorRect && interiorItems.length) {
     const { c0: ic, r0: ir, w, d } = interiorRect;
@@ -588,7 +681,7 @@ export function composeScenePlan(theme: string, occupied: Iterable<OccupiedBody>
     trees.forEach((item, i) => {
       const step = Math.max(2, Math.ceil(clearanceLots(item) * 2));
       const cols = Math.max(1, Math.floor(gardenRect.w / step));
-      const col = gardenRect.c0 + (i % cols) * step + (seed % 2 ? 0 : 1);
+      const col = gardenRect.c0 + (i % cols) * step + (propSeed % 2 ? 0 : 1);
       const row = gardenRect.r0 + Math.floor(i / cols) * step;
       place(item, col, row, "keeping the garden", { ring: 6 });
     });
@@ -687,58 +780,67 @@ export function composeScenePlan(theme: string, occupied: Iterable<OccupiedBody>
 
   // Skyline: facades shoulder to shoulder on the rise.
   if (skylineRect) {
-    let col = skylineRect.c0 + 1 + (seed % 2);
+    let col = skylineRect.c0 + 1 + (propSeed % 2);
     byRole.backdrop.slice(0, 4).forEach((item, i) => {
       place(item, col, skylineRect.r0 + (i % skylineRect.d), "raising the skyline", { ring: 1, allowSoft: true });
       col += 2 + (i % 2);
       if (col >= skylineRect.c0 + skylineRect.w - 1) col = skylineRect.c0 + 1;
     });
   } else {
-    let col = c0 + 1 + (seed % 3);
+    let col = c0 + 1 + (propSeed % 3);
     byRole.backdrop.slice(0, 4).forEach((item, i) => {
       place(item, col, r0, "raising the skyline", { ring: 1 });
       col += 2 + (i % 2);
     });
   }
 
-  // Track: a CONTIGUOUS circuit walked cell by cell around the platform's
-  // inner edge, so consecutive segments read as one continuous ride — a
-  // sparse ring of scattered barriers is exactly the pile we're replacing.
+  // Track: a CONTIGUOUS circuit that follows the island's own coastline —
+  // consecutive segments walk the shore ring in angular order, so the ride
+  // hugs whatever silhouette this seed drew.
   if (byRole.track.length) {
-    const walk: { col: number; row: number }[] = [];
-    const [l, r, t, b] = [c0, c0 + mainW - 1, r0, r0 + mainD - 1];
-    for (let cCur = l; cCur <= r; cCur += 1) walk.push({ col: cCur, row: t });
-    for (let rCur = t + 1; rCur <= b; rCur += 1) walk.push({ col: r, row: rCur });
-    for (let cCur = r - 1; cCur >= l; cCur -= 1) walk.push({ col: cCur, row: b });
-    for (let rCur = b - 1; rCur > t; rCur -= 1) walk.push({ col: l, row: rCur });
-    const start = seed % walk.length;
-    byRole.track.slice(0, walk.length).forEach((item, i) => {
-      place(item, walk[(start + i) % walk.length].col, walk[(start + i) % walk.length].row, "laying the circuit", {
-        ring: 0,
-        allowSoft: true,
-        tight: true,
+    const walk: { col: number; row: number; ang: number }[] = [];
+    for (const cellId of island.cells) {
+      const [col, row] = cellId.split(":").map(Number);
+      const onCoast =
+        !maskHas(island, col + 1, row) ||
+        !maskHas(island, col - 1, row) ||
+        !maskHas(island, col, row + 1) ||
+        !maskHas(island, col, row - 1);
+      if (onCoast) walk.push({ col, row, ang: Math.atan2(row - center.row, col - center.col) });
+    }
+    walk.sort((a, b) => a.ang - b.ang);
+    if (walk.length) {
+      const start = propSeed % walk.length;
+      byRole.track.slice(0, walk.length).forEach((item, i) => {
+        place(item, walk[(start + i) % walk.length].col, walk[(start + i) % walk.length].row, "laying the circuit", {
+          ring: 0,
+          allowSoft: true,
+          tight: true,
+        });
       });
-    });
+    }
   }
 
   // People last — they live near the action. Each zone gets an anchor crowd;
   // pets favor the garden and the square.
-  const anchors: { col: number; row: number; label: string }[] = [];
+  const anchors: { col: number; row: number; label: string; rect: LotRect }[] = [];
   for (const zone of zones) {
     if (zone.focal && zone.type !== "skyline" && zone.type !== "harbor") {
-      anchors.push({ col: Math.round(zone.focal.col), row: Math.round(zone.focal.row), label: zone.label });
+      anchors.push({ col: Math.round(zone.focal.col), row: Math.round(zone.focal.row), label: zone.label, rect: zone.rect });
     }
   }
-  if (!anchors.length) anchors.push({ col: focal.col, row: focal.row, label: "the square" });
+  if (!anchors.length) anchors.push({ col: focal.col, row: focal.row, label: "the square", rect: plazaRect });
   byRole.person.forEach((item, i) => {
     const anchor = anchors[i % anchors.length];
     const jitter = [(i * 7) % 3 - 1, ((i * 5) % 3) - 1];
-    const col = anchor.col + jitter[0];
-    const row = anchor.row + 1 + jitter[1];
+    // People belong INSIDE their zone — clamp the jitter to its bounds so a
+    // wanderer never drifts past the rect it is meant to inhabit.
+    const col = Math.min(anchor.rect.c0 + anchor.rect.w - 1, Math.max(anchor.rect.c0, anchor.col + jitter[0]));
+    const row = Math.min(anchor.rect.r0 + anchor.rect.d - 1, Math.max(anchor.rect.r0, anchor.row + 1 + jitter[1]));
     place(item, col, row, i % 3 === 0 ? `taking in ${anchor.label}` : `together in ${anchor.label}`, {
       rot: faceToward(col, row, anchor),
       flip: i % 2 === 1,
-      ring: 2,
+      ring: 1,
       allowSoft: true,
     });
   });
@@ -758,5 +860,5 @@ export function composeScenePlan(theme: string, occupied: Iterable<OccupiedBody>
       reason: p.reason,
     });
   }
-  return { env, todos };
+  return { env: withWaterPaint(env, seedStr), todos, seed: seedStr };
 }

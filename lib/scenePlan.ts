@@ -18,6 +18,10 @@ export type { ComposedPlan, SceneTodo };
  * platforms/elevation/walls/stairs, then fill each zone with purpose-grouped
  * clusters — landmark first, people last. Human-locked lots are skipped.
  */
-export function planCompleteScene(theme: string, occupied: Iterable<OccupiedBody> = []): ComposedPlan {
-  return composeScenePlan(theme, occupied);
+export function planCompleteScene(
+  theme: string,
+  occupied: Iterable<OccupiedBody> = [],
+  sceneSeed?: string,
+): ComposedPlan {
+  return composeScenePlan(theme, occupied, sceneSeed);
 }

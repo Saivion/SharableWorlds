@@ -1,11 +1,12 @@
 "use client";
 
 import { create } from "zustand";
+import type { SceneMeta } from "./composition/seed";
 import type { EnvironmentSpec } from "./composition/types";
 import type { Piece, StoryEvent, ToolMode } from "./types";
 import { LABEL_MAX_CHARS } from "./types";
 
-export const AGENT_ACCENT = "#4f6bed";
+export const AGENT_ACCENT = "#236ffd";
 
 const HUMAN_ACTIONS_MAX = 6;
 const UNDO_MAX = 40;
@@ -28,6 +29,9 @@ export type TownStore = {
    * means freeform — the stage derives ground pads under whatever exists.
    */
   environment: EnvironmentSpec | null;
+  /** Seed + prompt + generator version of the current procedural scene —
+   * enough to reproduce the world. Null for authored/freeform boards. */
+  sceneMeta: SceneMeta | null;
   /** Per-catalog-item id counters — instance ids stay stable, never reused. */
   counters: Record<string, number>;
   /** Human's current selection (piece ids). */
@@ -49,10 +53,14 @@ export type TownStore = {
   agentCursor: { x: number; y: number; visible: boolean } | null;
   /** Catalog id the agent is currently grabbing in the kit. */
   agentGrabId: string | null;
+  /** Bulk carry: what the agent grabbed and how many are left to place. */
+  agentCarry: { catalogId: string; count: number } | null;
   /** True between a write's start and finish — drives the "agent building" state. */
   agentBusy: boolean;
   /** True while a multi-piece Nudge build is in flight — keeps busy across placements. */
   agentLoop: boolean;
+  /** WebMCP tool invocations this chapter — name → call count. */
+  toolCalls: Record<string, number>;
   /** Kit palette open — the agent opens it when grabbing a piece. */
   kitOpen: boolean;
   /** Bumped when the camera should ease to frame the town (first build). */
@@ -69,6 +77,7 @@ export type TownStore = {
   lastError: string | null;
 
   setEnvironment: (env: EnvironmentSpec | null) => void;
+  setSceneMeta: (meta: SceneMeta | null) => void;
   addPiece: (piece: Piece) => void;
   deletePiece: (id: string) => void;
   patchPiece: (id: string, patch: Partial<Piece>) => void;
@@ -81,8 +90,10 @@ export type TownStore = {
   setAgentGhost: (ghost: { lot: string; catalogId: string } | null) => void;
   setAgentCursor: (cursor: { x: number; y: number; visible: boolean } | null) => void;
   setAgentGrabId: (id: string | null) => void;
+  setAgentCarry: (carry: { catalogId: string; count: number } | null) => void;
   setAgentBusy: (busy: boolean) => void;
   setAgentLoop: (loop: boolean) => void;
+  recordToolCall: (name: string) => void;
   setKitOpen: (open: boolean) => void;
   bumpFocus: () => void;
   setNudgeGoal: (goal: string | null) => void;
@@ -102,6 +113,7 @@ export function clampLabel(text: string) {
 export const useTown = create<TownStore>((set, get) => ({
   pieces: {},
   environment: null,
+  sceneMeta: null,
   counters: {},
   selection: [],
   humanActions: [],
@@ -111,8 +123,10 @@ export const useTown = create<TownStore>((set, get) => ({
   agentGhost: null,
   agentCursor: null,
   agentGrabId: null,
+  agentCarry: null,
   agentBusy: false,
   agentLoop: false,
+  toolCalls: {},
   kitOpen: true,
   focusToken: 0,
   nudgeGoal: null,
@@ -124,6 +138,7 @@ export const useTown = create<TownStore>((set, get) => ({
   lastError: null,
 
   setEnvironment: (environment) => set({ environment }),
+  setSceneMeta: (sceneMeta) => set({ sceneMeta }),
   addPiece: (piece) =>
     set((state) => ({
       pieces: {
@@ -164,8 +179,13 @@ export const useTown = create<TownStore>((set, get) => ({
   setAgentGhost: (agentGhost) => set({ agentGhost }),
   setAgentCursor: (agentCursor) => set({ agentCursor }),
   setAgentGrabId: (agentGrabId) => set({ agentGrabId }),
+  setAgentCarry: (agentCarry) => set({ agentCarry }),
   setAgentBusy: (agentBusy) => set({ agentBusy }),
   setAgentLoop: (agentLoop) => set({ agentLoop }),
+  recordToolCall: (name) =>
+    set((state) => ({
+      toolCalls: { ...state.toolCalls, [name]: (state.toolCalls[name] ?? 0) + 1 },
+    })),
   setKitOpen: (kitOpen) => set({ kitOpen }),
   bumpFocus: () => set((state) => ({ focusToken: state.focusToken + 1 })),
   setNudgeGoal: (goal) => {
@@ -190,14 +210,17 @@ export const useTown = create<TownStore>((set, get) => ({
       return {
         pieces: {},
         environment: null,
+        sceneMeta: null,
         counters: {},
         selection: [],
         undoStack: [],
         agentGhost: null,
         agentCursor: null,
         agentGrabId: null,
+        agentCarry: null,
         agentBusy: false,
         agentLastMove: null,
+        toolCalls: {},
         lastError: null,
         kitOpen: true,
         nudgeGoal: trimmed,
