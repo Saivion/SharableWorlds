@@ -3,7 +3,6 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { parseShareParams } from "@/lib/composition/seed";
 import { runGoalBuild } from "@/lib/goalRunner";
-import { seedReferenceScene } from "@/lib/scenes/reference";
 import { callTownTool, registerTownTools, TOWN_TOOLS } from "@/lib/town";
 import { SeedChip } from "./SeedChip";
 import { AGENT_ACCENT, useTown } from "@/lib/store";
@@ -47,8 +46,8 @@ export function Studio() {
   useEffect(() => {
     if (process.env.NODE_ENV === "production") return;
     (window as unknown as {
-      __townTools?: { call: typeof callTownTool; tools: typeof TOWN_TOOLS };
-    }).__townTools = { call: callTownTool, tools: TOWN_TOOLS };
+      __townTools?: { call: (name: string, input?: Record<string, unknown>) => ReturnType<typeof callTownTool>; tools: typeof TOWN_TOOLS; store: typeof useTown };
+    }).__townTools = { call: (name, input = {}) => callTownTool(name, input, "ui"), tools: TOWN_TOOLS, store: useTown };
   }, []);
 
   // Committing a Nudge builds toward it immediately — the local fallback for
@@ -58,16 +57,14 @@ export function Studio() {
     void runGoalBuild(nudgeGoal);
   }, [nudgeToken, nudgeGoal]);
 
-  // Boot: a share URL (?scene=…&seed=…) reconstructs that exact procedural
-  // world — the seed is sufficient, no coordinates travel in the link.
-  // Otherwise the first visit opens on the authored reference diorama.
+  // Boot: a share URL (?scene=…&seed=…) reconstructs that base world through
+  // the same lifecycle an agent runs — the seed is sufficient, no
+  // coordinates travel in the link.
   useEffect(() => {
     const shared = parseShareParams(window.location.search);
     if (shared) {
-      void callTownTool("compose_scene", { theme: shared.prompt, seed: shared.seed });
-      return;
+      void callTownTool("build_scene", { theme: shared.prompt, seed: shared.seed }, "ui");
     }
-    seedReferenceScene();
   }, []);
 
   useEffect(() => {

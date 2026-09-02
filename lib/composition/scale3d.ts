@@ -115,24 +115,62 @@ const BULKY_KINDS = new Set<CatalogKind>([
  * Diagonal neighbors are only 1.41 lots apart — two wide pieces on a
  * diagonal still clip, so bulky radii are sized to forbid that.
  */
+/**
+ * Thin (fence, wall, banner, sign) and flat (rug, plate, floor tile) pieces
+ * may stand shoulder to shoulder — their clearance is a small fraction of
+ * their footprint. Decided from measured geometry so the composer, the live
+ * placement engine, and the validator all agree on what "too close" means.
+ */
+const TIGHT_ID = /(^|-)(wall|fence|border|banner|flag|sign|signpost|lamp|column|gate|rail|rug|plate|floor|path)(-|$)/;
+
+export function isTightBody(item: CatalogItem): boolean {
+  const size = item.size;
+  if (!size) return false;
+  // A modular gate or wall module the size of a room is not a fence: only
+  // pieces that claim about a lot or less may pack shoulder to shoulder.
+  if (modelScale(item).footprint > 0.95) return false;
+  // Linear and flat kit pieces are meant to line up shoulder to shoulder.
+  if (TIGHT_ID.test(item.id)) return true;
+  const [w, h, d] = size;
+  const long = Math.max(w, d);
+  const short = Math.min(w, d);
+  if (long <= 0) return false;
+  const thin = short / long <= 0.36;
+  const flat = h / long <= 0.14;
+  return thin || flat;
+}
+
 export function clearanceLots(item: CatalogItem): number {
   const { footprint } = modelScale(item);
+  if (isTightBody(item)) return Math.max(0.24, Math.min(0.4, footprint * 0.3));
   // People and pets render wide (spread arms, chunky bodies): a 1-lot pair
   // interpenetrates and reads as stacked. The floor keeps neighbors at a
   // diagonal or further — close company, never a pile.
   if (item.kind === "character" || item.kind === "pet") return Math.max(0.55, footprint * 0.5);
   if (TIGHT_KINDS.has(item.kind)) return Math.max(0.32, footprint * 0.42);
   if (item.kind === "tree") return Math.max(0.78, footprint * 0.5 + 0.28);
+  // A kind is bulky only when the model actually is: a mushroom or a pumpkin
+  // is "nature" but claims no more floor than a mug.
   const bulky =
-    BULKY_KINDS.has(item.kind) ||
+    (BULKY_KINDS.has(item.kind) && footprint >= 0.45) ||
     ((item.kind === "prop" || item.kind === "stall" || item.kind === "dungeon") && footprint >= 0.5);
   if (bulky) return Math.max(0.68, footprint * 0.5 + 0.28);
   return Math.max(0.5, footprint * 0.5 + 0.18);
 }
 
-export function bodiesOverlap(
-  a: { col: number; row: number; r: number },
-  b: { col: number; row: number; r: number },
-): boolean {
+export type Body = { col: number; row: number; r: number; kind?: CatalogKind };
+
+/**
+ * THE collision rule — one function for the planner's board, the live
+ * placement engine, and the validator, so a plan the composer accepts is a
+ * plan the engine places. Tabletop food sits beside (visually on) anything;
+ * everything else keeps the sum of its clearances.
+ */
+export function bodiesCollide(a: Body, b: Body): boolean {
+  if (a.kind === "food" || b.kind === "food") return false;
   return Math.hypot(a.col - b.col, a.row - b.row) < a.r + b.r;
+}
+
+export function bodiesOverlap(a: Body, b: Body): boolean {
+  return bodiesCollide(a, b);
 }

@@ -77,6 +77,7 @@ function GroundBlocks({
   kind = "land",
   cellMaterial,
   cellWaterTone,
+  cellBottom,
 }: {
   rect: LotRect;
   top: number;
@@ -84,6 +85,9 @@ function GroundBlocks({
   material: PlatformMaterial;
   origin: number;
   kind?: "land" | "water";
+  /** Per-lot column base — a stacked tier starts where the tier beneath
+   * ends instead of sharing (and z-fighting) the lower column's faces. */
+  cellBottom?: (col: number, row: number) => number;
   /** Per-lot themed override — material patches painted by the terrain system. */
   cellMaterial?: (col: number, row: number) => PlatformMaterial | undefined;
   /** Per-lot water tone — seeded patch regions from paintWater. */
@@ -139,11 +143,12 @@ function GroundBlocks({
             const oz = (sz + 0.5 - sub / 2) * size;
             const lift = wet ? 0 : blockLift(gx, gz);
             const cap = DECK_BLOCK + lift;
-            const h = Math.max(DECK_BLOCK, top + cap - bottom);
+            const base = cellBottom ? cellBottom(rect.c0 + dc, rect.r0 + dr) : bottom;
+            const h = Math.max(DECK_BLOCK, top + cap - base);
             const delay = dropDelay(gx, gz, origin);
             cells.push({
               x: (rect.c0 + dc) * TILE + ox,
-              y: bottom + h / 2,
+              y: base + h / 2,
               z: (rect.r0 + dr) * TILE + oz,
               sy: h / DECK_BLOCK,
               delay,
@@ -196,7 +201,7 @@ function GroundBlocks({
       if (rubble.instanceColor) rubble.instanceColor.needsUpdate = true;
     }
     rubbleRest.current = rubbleCells;
-  }, [rect.c0, rect.r0, rect.w, rect.d, material, wet, top, bottom, origin, sub, size, dummy, rubbleSpots, cellMaterial, cellWaterTone]);
+  }, [rect.c0, rect.r0, rect.w, rect.d, material, wet, top, bottom, origin, sub, size, dummy, rubbleSpots, cellMaterial, cellWaterTone, cellBottom]);
 
   useFrame(() => {
     if (done.current || born.current === 0) return;
@@ -289,25 +294,29 @@ function Platform({
   level,
   material,
   inset,
+  lift = 0,
   origin,
   cellMaterial,
+  cellBottom,
 }: {
   rect: LotRect;
   level: number;
   material: PlatformMaterial;
   inset?: boolean;
+  lift?: number;
   origin: number;
   cellMaterial?: (col: number, row: number) => PlatformMaterial | undefined;
+  cellBottom?: (col: number, row: number) => number;
 }) {
-  const top = level * ELEV + (inset ? 0.06 : 0);
+  const top = level * ELEV + lift + (inset ? 0.06 : 0);
   const height = inset ? 0.06 : top + PLINTH_DEPTH;
   const bottom = top - height;
-  return <GroundBlocks rect={rect} top={top} bottom={bottom} material={material} origin={origin} cellMaterial={cellMaterial} />;
+  return <GroundBlocks rect={rect} top={top} bottom={bottom} material={material} origin={origin} cellMaterial={cellMaterial} cellBottom={inset ? undefined : cellBottom} />;
 }
 
 function Wall({ wall }: { wall: WallSpec }) {
-  const body = useMat(WALL_COLOR, { roughness: 0.82 });
-  const cap = useMat(WALL_CAP, { roughness: 0.78 });
+  const body = useMat(wall.color ?? WALL_COLOR, { roughness: 0.82 });
+  const cap = useMat(wall.cap ?? WALL_CAP, { roughness: 0.78 });
   const t = 0.16 * TILE;
   const segments = useMemo(() => {
     const open = new Set(wall.openings ?? []);
@@ -508,6 +517,25 @@ export const Environment3D = memo(function Environment3D({
     [paths, surfaceYAt],
   );
 
+  // A raised platform's column rests on the highest platform beneath each
+  // of its lots (the island under a hill, a hill tier under the next), and
+  // reaches the plinth only where nothing is beneath (a ridge past the
+  // coast). Coplanar column faces were z-fighting as shimmer on hillsides.
+  const platformsRef = env?.platforms;
+  const bottomFor = useMemo(() => {
+    const all = (platformsRef ?? []).filter((p) => !p.inset);
+    const topOf = (p: (typeof all)[number]) => p.level * ELEV + (p.lift ?? 0);
+    return (self: (typeof all)[number]) => (col: number, row: number) => {
+      let best = -PLINTH_DEPTH;
+      for (const q of all) {
+        if (q === self || q.level >= self.level) continue;
+        if (col < q.rect.c0 || col >= q.rect.c0 + q.rect.w || row < q.rect.r0 || row >= q.rect.r0 + q.rect.d) continue;
+        best = Math.max(best, topOf(q) + DECK_BLOCK);
+      }
+      return best;
+    };
+  }, [platformsRef]);
+
   return (
     <group>
       {env?.platforms.map((p) => (
@@ -517,8 +545,10 @@ export const Environment3D = memo(function Environment3D({
           level={p.level}
           material={p.material}
           inset={p.inset}
+          lift={p.lift}
           origin={origin}
           cellMaterial={p.inset || p.level > 0 ? undefined : cellMaterial}
+          cellBottom={p.level > 0 && !p.inset ? bottomFor(p) : undefined}
         />
       ))}
       {autoPads.map((pad, i) => (

@@ -1,10 +1,38 @@
 "use client";
 
 import { create } from "zustand";
+import type { ComposedPlan } from "./composition/compose";
 import type { SceneMeta } from "./composition/seed";
 import type { EnvironmentSpec } from "./composition/types";
+import type { ValidationReport } from "./composition/validate";
 import type { Piece, StoryEvent, ToolMode } from "./types";
 import { LABEL_MAX_CHARS } from "./types";
+
+/** Lifecycle phase a WebMCP call belongs to — derived from the tool name. */
+export type BuildPhase = "understand" | "plan" | "compose" | "execute" | "inspect" | "validate" | "repair" | "complete";
+
+export type TraceCaller = "host" | "runner" | "ui";
+
+/** One WebMCP call in the lifecycle trace: tool, args, timing, outcome. */
+export type TraceEntry = {
+  id: number;
+  /** Enclosing call when a bulk/orchestrating tool dispatched this one. */
+  parent?: number;
+  phase: BuildPhase;
+  tool: string;
+  caller: TraceCaller;
+  /** Compact JSON of the arguments (≤ 160 chars). */
+  args: string;
+  t: number;
+  ms?: number;
+  ok?: boolean;
+  /** One line: the tool's `noticed` / `error`. */
+  summary?: string;
+  placed?: number;
+  skipped?: number;
+};
+
+const TRACE_MAX = 400;
 
 export const AGENT_ACCENT = "#236ffd";
 
@@ -61,6 +89,15 @@ export type TownStore = {
   agentLoop: boolean;
   /** WebMCP tool invocations this chapter — name → call count. */
   toolCalls: Record<string, number>;
+  /** The lifecycle trace this chapter — every WebMCP call, nested. */
+  trace: TraceEntry[];
+  /** The phase the agent is in right now (last call), or complete. */
+  phase: BuildPhase | null;
+  /** Last validation report — the completeness score the UI shows. */
+  validation: (ValidationReport & { t: number }) | null;
+  /** The plan the current scene was composed from — the staged tools
+   * (compose_scene / populate_zones / create_environment) read it. */
+  scenePlan: ComposedPlan | null;
   /** Kit palette open — the agent opens it when grabbing a piece. */
   kitOpen: boolean;
   /** Bumped when the camera should ease to frame the town (first build). */
@@ -94,6 +131,13 @@ export type TownStore = {
   setAgentBusy: (busy: boolean) => void;
   setAgentLoop: (loop: boolean) => void;
   recordToolCall: (name: string) => void;
+  beginTrace: (entry: Omit<TraceEntry, "id" | "t">) => number;
+  endTrace: (id: number, patch: Partial<TraceEntry>) => void;
+  setPhase: (phase: BuildPhase | null) => void;
+  setValidation: (report: ValidationReport | null) => void;
+  setScenePlan: (plan: ComposedPlan | null) => void;
+  /** Add many pieces in ONE store update (one render), for bulk tools. */
+  addPieces: (pieces: Piece[]) => void;
   setKitOpen: (open: boolean) => void;
   bumpFocus: () => void;
   setNudgeGoal: (goal: string | null) => void;
@@ -109,6 +153,8 @@ export function clampLabel(text: string) {
   // Printable characters only — tool input is untrusted.
   return text.replace(/[\u0000-\u001F\u007F]/g, "").slice(0, LABEL_MAX_CHARS);
 }
+
+let traceSeq = 1;
 
 export const useTown = create<TownStore>((set, get) => ({
   pieces: {},
@@ -127,6 +173,10 @@ export const useTown = create<TownStore>((set, get) => ({
   agentBusy: false,
   agentLoop: false,
   toolCalls: {},
+  trace: [],
+  phase: null,
+  validation: null,
+  scenePlan: null,
   kitOpen: true,
   focusToken: 0,
   nudgeGoal: null,
@@ -186,6 +236,25 @@ export const useTown = create<TownStore>((set, get) => ({
     set((state) => ({
       toolCalls: { ...state.toolCalls, [name]: (state.toolCalls[name] ?? 0) + 1 },
     })),
+  beginTrace: (entry) => {
+    const id = traceSeq++;
+    set((state) => ({
+      trace: [...state.trace, { ...entry, id, t: Date.now() }].slice(-TRACE_MAX),
+      phase: entry.phase,
+    }));
+    return id;
+  },
+  endTrace: (id, patch) =>
+    set((state) => ({ trace: state.trace.map((e) => (e.id === id ? { ...e, ...patch } : e)) })),
+  setPhase: (phase) => set({ phase }),
+  setValidation: (report) => set({ validation: report ? { ...report, t: Date.now() } : null }),
+  setScenePlan: (scenePlan) => set({ scenePlan }),
+  addPieces: (list) =>
+    set((state) => {
+      const pieces = { ...state.pieces };
+      for (const piece of list) pieces[piece.id] = { ...piece, label: clampLabel(piece.label), flip: Boolean(piece.flip) };
+      return { pieces };
+    }),
   setKitOpen: (kitOpen) => set({ kitOpen }),
   bumpFocus: () => set((state) => ({ focusToken: state.focusToken + 1 })),
   setNudgeGoal: (goal) => {
@@ -221,6 +290,10 @@ export const useTown = create<TownStore>((set, get) => ({
         agentBusy: false,
         agentLastMove: null,
         toolCalls: {},
+        trace: [],
+        phase: null,
+        validation: null,
+        scenePlan: null,
         lastError: null,
         kitOpen: true,
         nudgeGoal: trimmed,

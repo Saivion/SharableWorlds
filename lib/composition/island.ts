@@ -159,7 +159,7 @@ function organicBlobCells(
   const squish = 0.85 + rng() * 0.3;
   const rot = rng() * Math.PI;
 
-  let cells = new Set<string>();
+  const cells = new Set<string>();
   const margin = 4;
   for (let row = Math.floor(center.row - rz - margin); row <= Math.ceil(center.row + rz + margin); row += 1) {
     for (let col = Math.floor(center.col - rx - margin); col <= Math.ceil(center.col + rx + margin); col += 1) {

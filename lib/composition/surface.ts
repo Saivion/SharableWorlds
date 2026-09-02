@@ -32,7 +32,7 @@ export function surfaceAt(env: EnvironmentSpec | null, col: number, row: number)
     if (platform) {
       return {
         level: platform.level,
-        y: platform.level * ELEV + (platform.inset ? 0.06 : 0) + DECK_BLOCK,
+        y: platform.level * ELEV + (platform.lift ?? 0) + (platform.inset ? 0.06 : 0) + DECK_BLOCK,
         kind: "platform",
         platform,
       };

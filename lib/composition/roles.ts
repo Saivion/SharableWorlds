@@ -1,4 +1,5 @@
 import type { CatalogItem } from "../catalog";
+import { modelScale } from "./scale3d";
 import { CLUTTER_KINDS } from "./select";
 
 /**
@@ -50,5 +51,11 @@ export function roleOf(item: CatalogItem): Role {
 /** Visual mass — scaled 3D footprint area when a model is known, sprite alpha
  * area otherwise. The biggest thing in a selection becomes the focal landmark. */
 export function visualMass(item: CatalogItem): number {
+  // Scaled 3D presence (footprint × height in lots/world units) when the
+  // model is measured; sprite alpha area only for the rare sprite-only item.
+  if (item.size) {
+    const { footprint, height } = modelScale(item);
+    return footprint * footprint * 1000 + height * 400;
+  }
   return item.content[2] * item.content[3];
 }

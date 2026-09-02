@@ -54,6 +54,9 @@ export type PlatformSpec = {
    * rug of grass). Renders slightly raised so same-level decks never z-fight.
    */
   inset?: boolean;
+  /** Extra world-unit height on top of level * ELEV — hill tiers step a
+   * little taller than interior terraces so relief reads from the camera. */
+  lift?: number;
 };
 
 export type WallSide = "n" | "s" | "e" | "w";
@@ -74,6 +77,9 @@ export type WallSpec = {
   /** Wall height in world units. */
   height: number;
   openings?: number[];
+  /** Seeded palette (hex) — plaster by default. */
+  color?: string;
+  cap?: string;
 };
 
 export type StairSpec = {

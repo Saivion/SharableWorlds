@@ -1,7 +1,11 @@
-import type { CatalogItem, CatalogKind } from "../catalog";
+import type { CatalogItem } from "../catalog";
 import { lotIdOf, rectCenter, rectContains, type LotRect } from "./grid3d";
-import { roleOf, visualMass, type Role } from "./roles";
-import { bodiesOverlap, clearanceLots } from "./scale3d";
+import { understandIntent, type SceneIntent } from "./intent";
+import { Board, faceToward, groupByRole, key, planZones, INTERIOR_BY_KIND, type OccupiedBody, type Placement, type PlanPhase, type ZoneProgram } from "./layout";
+import { planBuilding, walledSides } from "./buildings";
+import { composeProgram, type LedgerEntry } from "./program";
+import { roleOf, visualMass } from "./roles";
+import { clearanceLots } from "./scale3d";
 import {
   coastColInRow,
   findZoneRect,
@@ -16,12 +20,15 @@ import {
 } from "./island";
 import { createSeededRandom, deriveSeed, generateSceneSeed, isValidSeed, normalizeSeed } from "./seed";
 import { selectItems } from "./select";
+import { fillToDensity, keepClearFor } from "./density";
+import { planRelief, reliefIntensity } from "./relief";
 import { paintTerrain, planBoundary, withWaterPaint } from "./terrain";
 import { resolveTheme } from "./themes";
+
+export { planZones, type ZoneProgram };
+export type { OccupiedBody };
 import { cellKey } from "./island";
 import type { EnvironmentSpec, PathSpec, PlatformMaterial, ZoneSpec, ZoneType } from "./types";
-
-export type OccupiedBody = { col: number; row: number; r: number };
 
 /**
  * The composer — theme in, authored-feeling scene out.
@@ -48,151 +55,29 @@ export type SceneTodo = {
   /** Yaw in quarter turns of degrees (0 | 90 | 180 | 270), clockwise from "facing the camera". */
   rot?: number;
   reason: string;
+  /** Zone id the piece belongs to ("picnic", "edge" for the boundary). */
+  zone?: string;
+  /** Archetype element role ("table", "burgers", "people", "boundary"). */
+  role?: string;
+  /** Build phase this todo belongs to. */
+  phase?: PlanPhase;
+  /** The lot the composition wanted when it had to nudge one cell. */
+  intended?: string;
 };
 
-export type ComposedPlan = { env: EnvironmentSpec; todos: SceneTodo[]; seed: string };
+export type ComposedPlan = {
+  env: EnvironmentSpec;
+  todos: SceneTodo[];
+  seed: string;
+  /** What the prompt was understood to mean. */
+  intent: SceneIntent;
+  /** Per-element wanted/placed bookkeeping (archetype scenes). */
+  ledger: LedgerEntry[];
+  /** Required elements that found no room. */
+  missing: string[];
+};
 
 const ORIGIN = { col: 12, row: 12 }; // M13 — the home window's center
-
-type Placement = {
-  item: CatalogItem;
-  col: number;
-  row: number;
-  flip?: boolean;
-  rot?: number;
-  reason: string;
-};
-
-/** Facing rotation that points a piece from (col,row) toward a target cell. */
-function faceToward(col: number, row: number, target: { col: number; row: number }): number {
-  const dc = target.col - col;
-  const dr = target.row - row;
-  if (Math.abs(dc) >= Math.abs(dr)) return dc >= 0 ? 270 : 90; // east : west
-  return dr >= 0 ? 0 : 180; // south : north
-}
-
-// ---------------------------------------------------------------------------
-// Occupancy bookkeeping during composition
-// ---------------------------------------------------------------------------
-
-class Board {
-  taken = new Set<string>();
-  softReserved = new Set<string>(); // paths + breathing room — props avoid, people may stand
-  bodies: OccupiedBody[] = [];
-
-  constructor(occupied: Iterable<OccupiedBody>) {
-    for (const body of occupied) {
-      this.taken.add(key(body.col, body.row));
-      this.bodies.push({ col: body.col, row: body.row, r: body.r });
-    }
-  }
-
-  free(col: number, row: number, allowSoft = false, radius = 0.48): boolean {
-    const k = key(col, row);
-    if (this.taken.has(k)) return false;
-    if (!allowSoft && this.softReserved.has(k)) return false;
-    const next = { col, row, r: radius };
-    for (const body of this.bodies) {
-      if (bodiesOverlap(next, body)) return false;
-    }
-    return true;
-  }
-
-  claim(
-    col: number,
-    row: number,
-    allowSoft = false,
-    valid?: (col: number, row: number) => boolean,
-    radius = 0.48,
-  ): boolean {
-    if (valid && !valid(col, row)) return false;
-    if (!this.free(col, row, allowSoft, radius)) return false;
-    this.taken.add(key(col, row));
-    this.bodies.push({ col, row, r: radius });
-    return true;
-  }
-
-  /**
-   * Claim the cell or the nearest free cell within `ring` steps. `valid`
-   * fences the search to the scene's own architecture — a fallback cell must
-   * never escape the platforms, or the composition leaks into the void.
-   */
-  claimNear(
-    col: number,
-    row: number,
-    ring = 1,
-    allowSoft = false,
-    valid?: (col: number, row: number) => boolean,
-    radius = 0.48,
-  ): { col: number; row: number } | null {
-    for (let r = 0; r <= ring; r += 1) {
-      for (let dc = -r; dc <= r; dc += 1) {
-        for (let dr = -r; dr <= r; dr += 1) {
-          if (Math.max(Math.abs(dc), Math.abs(dr)) !== r) continue;
-          if (this.claim(col + dc, row + dr, allowSoft, valid, radius)) {
-            return { col: col + dc, row: row + dr };
-          }
-        }
-      }
-    }
-    return null;
-  }
-}
-
-function key(col: number, row: number) {
-  return `${col}:${row}`;
-}
-
-// ---------------------------------------------------------------------------
-// Zone program — what places does this theme need?
-// ---------------------------------------------------------------------------
-
-type ZonePlan = {
-  type: ZoneType;
-  label: string;
-};
-
-const INTERIOR_BY_KIND: Partial<Record<CatalogKind, { type: ZoneType; label: string }>> = {
-  furniture: { type: "home", label: "the house" },
-  machine: { type: "arcade", label: "the hall" },
-  dungeon: { type: "keep", label: "the keep" },
-  cave: { type: "keep", label: "the hollow" },
-  space: { type: "lab", label: "the station" },
-};
-
-export type ZoneProgram = {
-  interior: ZonePlan | null;
-  market: boolean;
-  garden: boolean;
-  harbor: boolean;
-  street: boolean;
-  skyline: boolean;
-};
-
-export function planZones(byRole: Record<Role, CatalogItem[]>): ZoneProgram {
-  const interiorCounts = new Map<CatalogKind, number>();
-  for (const item of byRole.structure) {
-    const plan = INTERIOR_BY_KIND[item.kind];
-    if (plan) interiorCounts.set(item.kind, (interiorCounts.get(item.kind) ?? 0) + 1);
-  }
-  let interior: ZonePlan | null = null;
-  let best = 0;
-  for (const [kind, count] of interiorCounts) {
-    if (count >= 4 && count > best) {
-      best = count;
-      interior = INTERIOR_BY_KIND[kind] ?? null;
-    }
-  }
-  const stalls = byRole.structure.filter((i) => i.kind === "stall").length;
-  return {
-    interior,
-    market: stalls >= 2 && interior?.type !== "home",
-    garden: byRole.scenery.length + byRole.ground.length >= 5,
-    harbor: byRole.vessel.length >= 1,
-    street: byRole.vehicle.length >= 2,
-    skyline: byRole.backdrop.length >= 2,
-  };
-}
 
 function mainMaterial(items: CatalogItem[]): PlatformMaterial {
   const packs = new Map<string, number>();
@@ -219,16 +104,27 @@ export function composeScenePlan(
   // The scene seed is the ONLY source of variation. Same prompt + same seed
   // = same world; a fresh seed is minted when none is given (a new scene).
   const seedStr = sceneSeed && isValidSeed(sceneSeed) ? normalizeSeed(sceneSeed) : generateSceneSeed(theme);
+  // UNDERSTAND first: a prompt that names a kind of place is composed by
+  // its archetype's rules. Anything else falls through to the
+  // selection-driven composer below.
+  const intent = understandIntent(theme);
+  if (intent.archetype) {
+    const program = composeProgram(intent, intent.archetype, occupied, seedStr);
+    return {
+      env: program.env,
+      todos: toTodos(program.placements),
+      seed: seedStr,
+      intent,
+      ledger: program.ledger,
+      missing: program.missing,
+    };
+  }
   // One derived seed per subsystem: reselecting decoration must never
   // reshuffle the architecture, and vice versa.
   const items = selectItems(theme, deriveSeed(seedStr, "selection"));
   const propSeed = deriveSeed(seedStr, "props");
 
-  const byRole: Record<Role, CatalogItem[]> = {
-    ground: [], wall: [], connector: [], structure: [], backdrop: [],
-    track: [], tabletop: [], vessel: [], vehicle: [], person: [], scenery: [],
-  };
-  for (const item of items) byRole[roleOf(item)].push(item);
+  const byRole = groupByRole(items);
   const structures = [...byRole.structure].sort((a, b) => visualMass(b) - visualMass(a));
 
   const zonePlan = planZones(byRole);
@@ -293,30 +189,19 @@ export function composeScenePlan(
     interiorRect = findZoneRect(island, zoneRects, w, d, biasFor(corner));
     if (interiorRect) {
       zoneRects.push(interiorRect);
-      env.platforms.push({
+      // A seeded building design: walls, parapets, doorway, palette, floor.
+      const building = planBuilding({
         id: "terrace",
+        type: zonePlan.interior.type,
         rect: interiorRect,
-        level: 1,
-        material: zonePlan.interior.type === "home" ? "wood" : "tile",
+        onDeck: (c, r) => maskHas(island, c, r),
+        theme: themeSpec,
+        rng: createSeededRandom(deriveSeed(seedStr, "building:terrace")),
       });
-      env.walls.push(
-        { id: "terrace-n", c: interiorRect.c0, r: interiorRect.r0, len: interiorRect.w, dir: "h", side: "n", height: 1.7 },
-        { id: "terrace-w", c: interiorRect.c0, r: interiorRect.r0, len: interiorRect.d, dir: "v", side: "w", height: 1.7 },
-      );
-      // The stair lands on the first coast-approved side: south (open), east
-      // (unwalled), then north.
-      const midC = interiorRect.c0 + Math.floor(interiorRect.w / 2);
-      const midR = interiorRect.r0 + Math.floor(interiorRect.d / 2);
-      const stairSpots = [
-        { at: { col: midC, row: interiorRect.r0 + interiorRect.d }, dir: "n" as const },
-        { at: { col: interiorRect.c0 + interiorRect.w, row: midR }, dir: "w" as const },
-        { at: { col: midC, row: interiorRect.r0 - 1 }, dir: "s" as const },
-      ];
-      const stair = stairSpots.find((s) => maskHas(island, s.at.col, s.at.row));
-      if (stair) {
-        env.stairs.push({ id: "terrace-stair", at: stair.at, dir: stair.dir, fromLevel: 0, toLevel: 1 });
-        board.taken.add(key(stair.at.col, stair.at.row));
-      }
+      env.platforms.push(...building.platforms);
+      env.walls.push(...building.walls);
+      env.stairs.push(building.stair);
+      board.taken.add(key(building.stair.at.col, building.stair.at.row));
       zones.push({
         id: "interior",
         type: zonePlan.interior.type,
@@ -485,7 +370,7 @@ export function composeScenePlan(
   const paths: PathSpec[] = [];
   const entranceStart = southCoastRow(island, focal.col) ?? r0 + mainD - 1;
   const pathCells: { col: number; row: number }[] = [];
-  for (let r = entranceStart; r >= focal.row; r -= 1) {
+  for (let r = entranceStart; r > focal.row; r -= 1) {
     if (maskHas(island, focal.col, r)) pathCells.push({ col: focal.col, row: r });
   }
   paths.push({ id: "entrance", cells: pathCells });
@@ -495,14 +380,31 @@ export function composeScenePlan(
     const dir = stair.at.col <= focal.col ? 1 : -1;
     for (let cCur = stair.at.col; cCur !== focal.col; cCur += dir) cells.push({ col: cCur, row: stair.at.row });
     for (let rCur = stair.at.row; rCur !== focal.row; rCur += Math.sign(focal.row - stair.at.row) || 1) {
+      if (Math.abs(rCur - focal.row) <= 1) break;
       cells.push({ col: focal.col, row: rCur });
-      if (rCur === focal.row) break;
     }
     paths.push({ id: "stair-walk", cells: cells.filter((cell) => maskHas(island, cell.col, cell.row)) });
   }
   env.paths = paths;
   for (const path of paths) {
     for (const cell of path.cells) board.softReserved.add(key(cell.col, cell.row));
+  }
+
+  // --- Relief: seeded hills at the rim, outside every zone and walk --------
+  {
+    const avoid = new Set<string>();
+    const around = (col: number, row: number) => {
+      for (let dr = -1; dr <= 1; dr += 1) for (let dc = -1; dc <= 1; dc += 1) avoid.add(cellKey(col + dc, row + dr));
+    };
+    for (const path of paths) for (const cell of path.cells) around(cell.col, cell.row);
+    for (const s of env.stairs) around(s.at.col, s.at.row);
+    for (const p of env.platforms) {
+      if (p.id === "pier" || p.material === "road") {
+        for (let r = p.rect.r0 - 1; r <= p.rect.r0 + p.rect.d; r += 1) for (let c = p.rect.c0 - 1; c <= p.rect.c0 + p.rect.w; c += 1) avoid.add(cellKey(c, r));
+      }
+    }
+    const relief = planRelief(island, env, themeSpec, createSeededRandom(deriveSeed(seedStr, "relief")), reliefIntensity(theme, undefined, createSeededRandom(deriveSeed(seedStr, "relief:roll"))), avoid);
+    env.platforms.push(...relief.platforms);
   }
 
   // Breathing room — a clear ring around the focal keeps the centerpiece
@@ -532,14 +434,18 @@ export function composeScenePlan(
       allowSoft?: boolean;
       surface?: "deck" | "water";
       tight?: boolean;
+      /** Extra fence — the zone rect a piece must stay inside. */
+      within?: (col: number, row: number) => boolean;
     } = {},
   ) => {
-    const valid = opts.surface === "water" ? onWater : onDeck;
-    const radius = opts.tight ? Math.min(0.4, clearanceLots(item) * 0.35) : clearanceLots(item);
-    const ring = opts.tight
-      ? (opts.ring ?? 0)
-      : Math.max(opts.ring ?? 1, Math.ceil(radius * 2) + 3);
-    const spot = board.claimNear(col, row, ring, opts.allowSoft ?? false, valid, radius);
+    const base = opts.surface === "water" ? onWater : onDeck;
+    const valid = opts.within ? (c: number, r: number) => base(c, r) && opts.within!(c, r) : base;
+    // The engine's own radius: what the plan accepts, the engine places.
+    const radius = clearanceLots(item);
+    // Respect the caller's ring: a placement nudges at most a cell or two
+    // and is otherwise dropped — never walked "blocks away".
+    const ring = opts.tight ? (opts.ring ?? 0) : Math.min(2, opts.ring ?? 1);
+    const spot = board.claimNear(col, row, ring, opts.allowSoft ?? false, valid, radius, item.kind);
     if (!spot) return false;
     placements.push({ item, col: spot.col, row: spot.row, flip: opts.flip, rot: opts.rot, reason });
     return true;
@@ -589,7 +495,7 @@ export function composeScenePlan(
       }
     }
     for (const p of planBoundary(island, themeSpec, seedStr, frameSkip)) {
-      place(p.item, p.col, p.row, p.reason, { ring: 0, tight: true, allowSoft: true, flip: p.flip });
+      place(p.item, p.col, p.row, p.reason, { ring: 0, tight: true, allowSoft: true, flip: p.flip, rot: p.rot });
     }
   }
 
@@ -622,15 +528,22 @@ export function composeScenePlan(
   const plazaSupport = support.filter((i) => !interiorItems.includes(i) && !marketStalls.includes(i)).slice(0, 6);
   if (interiorRect && interiorItems.length) {
     const { c0: ic, r0: ir, w, d } = interiorRect;
+    const room = interiorRect;
+    const onTerrace = (col: number, row: number) => rectContains(room, col, row);
+    // The back row hugs a real wall — north if walled, else south, else north.
+    const sides = walledSides(env, room);
+    const backRow = sides.includes("n") || !sides.includes("s") ? ir : ir + d - 1;
+    const backRot = backRow === ir ? 0 : 180;
     const wallRow = interiorItems.filter((_, i) => i % 2 === 0).slice(0, w);
     const innerRow = interiorItems.filter((_, i) => i % 2 === 1).slice(0, Math.max(1, w - 1));
     wallRow.forEach((item, i) => {
-      place(item, ic + (i % w), ir + Math.floor(i / w), `along the back of ${zones[0].label}`, { rot: 0, ring: 1 });
+      place(item, ic + (i % w), backRow + (backRow === ir ? 1 : -1) * Math.floor(i / w), `along the back of ${zones[0].label}`, { rot: backRot, ring: 1, within: onTerrace });
     });
     innerRow.forEach((item, i) => {
-      place(item, ic + 1 + (i % Math.max(1, w - 2)), ir + d - 1 - Math.floor(i / Math.max(1, w - 2)), `inside ${zones[0].label}`, {
+      place(item, ic + 1 + (i % Math.max(1, w - 2)), (backRow === ir ? ir + d - 1 : ir) + (backRow === ir ? -1 : 1) * Math.floor(i / Math.max(1, w - 2)), `inside ${zones[0].label}`, {
         rot: i % 2 ? 90 : 0,
         ring: 1,
+        within: onTerrace,
       });
     });
   }
@@ -845,20 +758,46 @@ export function composeScenePlan(
     });
   });
 
-  // --- Convert to todos ----------------------------------------------------
-  const todos: SceneTodo[] = [];
-  let n = 0;
+  // Fill the world: the density pass lays zone-appropriate texture over
+  // whatever ground the story left open, so a generic scene is as full as
+  // an archetype one.
+  placements.push(
+    ...fillToDensity({
+      env,
+      board,
+      theme: themeSpec,
+      seed: seedStr,
+      placed: placements.length,
+      keepClear: keepClearFor(env, zones.flatMap((z) => (z.focal ? [z.focal] : [])), pathCells[0] ?? null),
+    }),
+  );
+
+  // Tag every placement with its zone and build phase so the staged tools
+  // (populate_zones / create_environment) and the validator can read the
+  // generic plan the same way they read an archetype program.
+  const FRAME = new Set(["the wood at the edge", "standing at the boundary", "undergrowth", "framing the scene"]);
   for (const p of placements) {
-    n += 1;
-    todos.push({
-      id: `t${n}`,
-      place: p.item.id,
-      kind: p.item.kind,
-      lot: lotIdOf(p.col, p.row),
-      flip: Boolean(p.flip),
-      ...(p.rot ? { rot: p.rot } : {}),
-      reason: p.reason,
-    });
+    const zone = zones.find((z) => z.type !== "plaza" && rectContains(z.rect, p.col, p.row)) ?? zones.find((z) => rectContains(z.rect, p.col, p.row));
+    p.zone = FRAME.has(p.reason) ? "edge" : zone?.id ?? "open";
+    p.phase = FRAME.has(p.reason) ? "environment" : p.reason === "the centerpiece" ? "focal" : p.item.kind === "character" || p.item.kind === "pet" ? "people" : "populate";
+    p.role = FRAME.has(p.reason) ? "boundary" : p.reason === "the centerpiece" ? "focal" : p.item.kind === "character" ? "people" : roleOf(p.item);
   }
-  return { env: withWaterPaint(env, seedStr), todos, seed: seedStr };
+  return { env: withWaterPaint(env, seedStr), todos: toTodos(placements), seed: seedStr, intent, ledger: [], missing: [] };
+}
+
+/** Placements → todos, in composition order. */
+function toTodos(placements: Placement[]): SceneTodo[] {
+  return placements.map((p, i) => ({
+    id: `t${i + 1}`,
+    place: p.item.id,
+    kind: p.item.kind,
+    lot: lotIdOf(p.col, p.row),
+    flip: Boolean(p.flip),
+    ...(p.rot ? { rot: p.rot } : {}),
+    reason: p.reason,
+    ...(p.zone ? { zone: p.zone } : {}),
+    ...(p.role ? { role: p.role } : {}),
+    ...(p.phase ? { phase: p.phase } : {}),
+    ...(p.intended ? { intended: lotIdOf(p.intended.col, p.intended.row) } : {}),
+  }));
 }

@@ -2,6 +2,7 @@ import type { CatalogItem } from "../catalog";
 import { cellKey, maskHas, type IslandMask } from "./island";
 import { roleOf } from "./roles";
 import { clearanceLots } from "./scale3d";
+import { pickItems } from "./pick";
 import { createSeededRandom, deriveSeed } from "./seed";
 import { selectItems } from "./select";
 import type { ThemeSpec } from "./themes";
@@ -261,15 +262,36 @@ export type FramePlacement = {
   item: CatalogItem;
   col: number;
   row: number;
+  /** Always false: framing varies by seeded quarter-turn instead, so every
+   * boundary tree stays eligible for instanced rendering (a mirrored
+   * instance matrix inverts normals). */
   flip: boolean;
+  /** Seeded yaw (0|90|180|270) — the variation flips used to provide. */
+  rot?: number;
   reason: string;
 };
 
+/** Modular tileset kits (corridors, room shells) never make sense as loose
+ * framing pieces, whatever a theme's vocabulary pulls in. */
+const NO_FRAME_PACKS = new Set(["modular-dungeon", "space", "cave"]);
+
+const QUARTER_TURNS = [0, 90, 180, 270] as const;
+function seededTurn(rng: () => number): number | undefined {
+  const rot = QUARTER_TURNS[Math.floor(rng() * 4)];
+  return rot === 0 ? undefined : rot;
+}
+
 /** Framing items the theme's boundary draws from — varied but coherent. */
 export function boundaryPool(theme: ThemeSpec, sceneSeed: string, query?: string): CatalogItem[] {
-  const items = selectItems(query?.trim() || theme.boundaryQuery, deriveSeed(sceneSeed, "boundary"));
+  const seed = deriveSeed(sceneSeed, "boundary");
+  // A theme may name its framing outright (kits selection can't reach by
+  // word); an explicit style query from the agent overrides that.
+  const lead = !query?.trim() && theme.boundaryIds?.length ? pickItems({ ids: theme.boundaryIds }, seed, 12) : [];
+  const leadIds = new Set(lead.map((i) => i.id));
+  const items = [...lead, ...selectItems(query?.trim() || theme.boundaryQuery, seed).filter((i) => !leadIds.has(i.id))];
   return items
     .filter((i) => {
+      if (NO_FRAME_PACKS.has(i.pack)) return false;
       const role = roleOf(i);
       // Tabletop joins the pool so candy boundaries can be made of sweets.
       return role === "scenery" || role === "structure" || role === "ground" || role === "tabletop" || i.kind === "tree";
@@ -342,7 +364,7 @@ export function planBoundary(
       if (planted >= size) break;
       if (placedPts.some((p) => Math.hypot(p.col - cell.col, p.row - cell.row) < p.r + r)) continue;
       placedPts.push({ col: cell.col, row: cell.row, r });
-      out.push({ item: species, col: cell.col, row: cell.row, flip: rng() > 0.5, reason });
+      out.push({ item: species, col: cell.col, row: cell.row, flip: false, rot: seededTurn(rng), reason });
       planted += 1;
     }
   }
@@ -366,7 +388,7 @@ export function planBoundary(
         const r = clearanceLots(item);
         if (placedPts.some((p) => Math.hypot(p.col - col, p.row - row) < p.r + r)) continue;
         placedPts.push({ col, row, r });
-        out.push({ item, col, row, flip: rng() > 0.5, reason: "undergrowth" });
+        out.push({ item, col, row, flip: false, rot: seededTurn(rng), reason: "undergrowth" });
       }
     }
   }

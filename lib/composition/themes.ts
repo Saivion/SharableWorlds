@@ -34,6 +34,8 @@ export type ThemeSpec = {
   boundary: BoundaryKind;
   /** Catalog query the framing ring draws from. */
   boundaryQuery: string;
+  /** Exact framing ids that lead the pool — for kits selection can't reach by word. */
+  boundaryIds?: string[];
   /** Fraction of coast cells the boundary occupies — seed picks. */
   boundaryDensity: [number, number];
   /** Sparse inner-ring scatter (undergrowth, small rocks). */
@@ -311,9 +313,10 @@ export const THEMES: ThemeSpec[] = [
     rare: [{ m: "ember", share: [0.01, 0.03] }],
     pathMaterial: "stone",
     boundary: "stones",
-    boundaryQuery: "rock crater space cave stone",
+    boundaryQuery: "metal panel column",
+    boundaryIds: ["prototype-column", "prototype-column-rounded", "prototype-pipe", "prototype-pipe-section", "prototype-pipe-corner", "prototype-crate", "prototype-crate-color", "survival-metal-panel", "prototype-column-triangle"],
     boundaryDensity: [0.25, 0.45],
-    undergrowthQuery: "rock space crate machine",
+    undergrowthQuery: "crate pipe column",
   },
   {
     id: "toybox",

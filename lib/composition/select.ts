@@ -80,6 +80,18 @@ const PACK_VOCAB: Record<string, string[]> = {
 
 export const CLUTTER_KINDS = new Set(["prop", "crate", "other"]);
 
+/**
+ * Tileset pieces that only make sense assembled — floor slabs, stair
+ * modules, wall templates, corridor junctions, ladders, cable runs. Placed
+ * loose they read as stairs to nowhere and slabs sunk in the floor, so
+ * selection never hands them to a composer. (Lamps keep their "floor".)
+ */
+const TILESET_JUNK = /(^|-)(template|stairs|stair|ladder|cables|floor|floors|platform|border|corridor-(intersection|junction|transition)|patch)(-|$)/;
+export function isTilesetJunk(item: CatalogItem): boolean {
+  if (/lamp/.test(item.id)) return false;
+  return TILESET_JUNK.test(item.id);
+}
+
 /** How many pieces a matching pack may contribute. Rich kits are the whole
  * point of a theme — a picnic should look like a picnic, not six snacks. */
 const PACK_QUOTA: Record<string, number> = {
@@ -219,7 +231,7 @@ export function selectItems(theme: string, seed: number): CatalogItem[] {
   const tokens = tokensOf(theme);
   if (tokens.length) {
     const hayWords = buildHayWords();
-    const scored = CATALOG.map((item) => ({ item, score: selectionScore(item, tokens, hayWords) })).filter((r) => r.score > 0);
+    const scored = CATALOG.filter((item) => !isTilesetJunk(item)).map((item) => ({ item, score: selectionScore(item, tokens, hayWords) })).filter((r) => r.score > 0);
     if (scored.length) {
       // Seeded shuffle before a stable sort = deterministic tie-breaking, so
       // equal-score items vary by theme instead of following catalog order.
@@ -245,7 +257,7 @@ export function selectItems(theme: string, seed: number): CatalogItem[] {
   const secondPick = packs[(seed >>> 8) % packs.length];
   const second = secondPick === first ? packs[(packs.indexOf(first) + 1) % packs.length] : secondPick;
   return ensureCharacters(
-    diversify(seededShuffle(CATALOG.filter((i) => i.pack === first || i.pack === second), seed), SCENE_LIMIT, first),
+    diversify(seededShuffle(CATALOG.filter((i) => (i.pack === first || i.pack === second) && !isTilesetJunk(i)), seed), SCENE_LIMIT, first),
     seed,
   );
 }

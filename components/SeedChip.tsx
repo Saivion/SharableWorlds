@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { shareUrl } from "@/lib/composition/seed";
 import { useTown } from "@/lib/store";
 import { callTownTool } from "@/lib/town";
+import { ShareCard } from "./ShareCard";
 
 /**
  * The scene's seed identity, worn on the canvas: the seed is copyable, the
@@ -15,6 +15,7 @@ export function SeedChip() {
   const meta = useTown((s) => s.sceneMeta);
   const agentBusy = useTown((s) => s.agentBusy);
   const [flash, setFlash] = useState<string | null>(null);
+  const [shareOpen, setShareOpen] = useState(false);
   const timer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -40,17 +41,9 @@ export function SeedChip() {
     }
   };
 
-  const copyShare = async () => {
-    try {
-      await navigator.clipboard.writeText(shareUrl(window.location.origin, meta));
-      note("link copied");
-    } catch {
-      note("copy failed");
-    }
-  };
 
   const remix = () => {
-    void callTownTool("regenerate_scene", {});
+    void callTownTool("regenerate_scene", {}, "ui");
   };
 
   return (
@@ -59,13 +52,14 @@ export function SeedChip() {
         <span className="seed-chip-label">seed</span>
         <span className="seed-chip-value">{meta.seed}</span>
       </button>
-      <button type="button" className="seed-chip-btn" onClick={copyShare} title="Copy a link that reproduces this exact world">
+      <button type="button" className="seed-chip-btn" onClick={() => setShareOpen(true)} title="Share this world as a sticker">
         Share
       </button>
       <button type="button" className="seed-chip-btn" onClick={remix} disabled={agentBusy} title="New seed, new take on the same scene">
         Remix
       </button>
       {flash && <span className="seed-chip-flash">{flash}</span>}
+      {shareOpen && <ShareCard onClose={() => setShareOpen(false)} />}
     </div>
   );
 }

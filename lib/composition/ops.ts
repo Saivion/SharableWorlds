@@ -4,6 +4,8 @@ import { roleOf, visualMass, type Role } from "./roles";
 import { clearanceLots } from "./scale3d";
 import { cellKey, findZoneRect, generateHarborWaterMask, generateIslandMask, largestRectInMask, maskToRects, pushWaterMask, type HarborSide, type IslandMask } from "./island";
 import { createSeededRandom, deriveSeed } from "./seed";
+import { planBuilding } from "./buildings";
+import { resolveTheme, themeById } from "./themes";
 import { selectItems } from "./select";
 import { platformAt } from "./surface";
 import { emptyEnvironment, type EnvironmentSpec, type PlatformMaterial, type ZoneSpec, type ZoneType } from "./types";
@@ -263,35 +265,20 @@ export function addZone(
     }
     if (INTERIOR_TYPES.has(type)) {
       level = 1;
-      env.platforms.push({
-        id: uniqueId(env, "terrace"),
+      // The same seeded building designer the composers use.
+      const theme = themeById(env.themeId) ?? resolveTheme(label, deck.material);
+      const building = planBuilding({
+        id: uniqueId(env, zoneId),
+        type,
         rect,
-        level: 1,
-        material: type === "home" ? "wood" : "tile",
+        onDeck: (c, r) => deck.mask.cells.has(cellKey(c, r)),
+        theme,
+        rng: createSeededRandom(deriveSeed(opts.sceneSeed ?? "UNSEEDED", `building:${zoneId}:${env.zones.length}`)),
       });
-      env.walls.push(
-        { id: uniqueId(env, `${zoneId}-wall-n`), c: rect.c0, r: rect.r0, len: rect.w, dir: "h", side: "n", height: 1.7 },
-        { id: uniqueId(env, `${zoneId}-wall-w`), c: rect.c0, r: rect.r0, len: rect.d, dir: "v", side: "w", height: 1.7 },
-      );
-      const midC = rect.c0 + Math.floor(rect.w / 2);
-      const midR = rect.r0 + Math.floor(rect.d / 2);
-      const stairSpot =
-        [
-          { at: { col: midC, row: rect.r0 + rect.d }, dir: "n" as const },
-          { at: { col: rect.c0 + rect.w, row: midR }, dir: "w" as const },
-          { at: { col: midC, row: rect.r0 - 1 }, dir: "s" as const },
-        ].find((s) => deck.mask.cells.has(cellKey(s.at.col, s.at.row))) ?? {
-          at: { col: midC, row: rect.r0 + rect.d },
-          dir: "n" as const,
-        };
-      env.stairs.push({
-        id: uniqueId(env, `${zoneId}-stair`),
-        at: stairSpot.at,
-        dir: stairSpot.dir,
-        fromLevel: 0,
-        toLevel: 1,
-      });
-      note += "; walls and stair added";
+      env.platforms.push(...building.platforms);
+      env.walls.push(...building.walls);
+      env.stairs.push(building.stair);
+      note += `; ${building.style} building (${building.palette}) with stair added`;
     } else if (type === "garden" && deck.material !== "grass") {
       env.platforms.push({ id: uniqueId(env, "garden-bed"), rect, level: 0, material: "grass", inset: true });
       note += "; grass bed laid";
@@ -398,10 +385,16 @@ export function clusterForZone(
   const { c0, r0, w, d } = zone.rect;
   const cap = Math.max(3, Math.floor((w * d) / 2));
   const out: ClusterSpec[] = [];
+  const used = new Set<string>();
   const add = (item: CatalogItem, col: number, row: number, reason: string, opts: { flip?: boolean; rot?: number } = {}) => {
     if (out.length >= cap) return;
     if (!rectContains(zone.rect, col, row) && zone.type !== "harbor") return;
-    out.push({ id: item.id, lot: lotIdOf(col, row), flip: opts.flip, rot: opts.rot, reason });
+    // One lot, one piece: a second spec for the same cell would only be
+    // refused at placement time.
+    const lot = lotIdOf(col, row);
+    if (used.has(lot)) return;
+    used.add(lot);
+    out.push({ id: item.id, lot, flip: opts.flip, rot: opts.rot, reason });
   };
   const focal = zone.focal ?? rectCenter(zone.rect);
 
@@ -478,13 +471,7 @@ export function clusterForZone(
   byRole.person.slice(0, 2).forEach((item, i) => {
     const col = Math.min(c0 + w - 1, Math.max(c0, Math.round(focal.col) + (i === 0 ? -1 : 1)));
     const row = Math.min(r0 + d - 1, Math.max(r0, Math.round(focal.row) + 1));
-    out.push({
-      id: item.id,
-      lot: lotIdOf(col, row),
-      rot: i === 0 ? 270 : 90,
-      flip: i === 1,
-      reason: `together in ${zone.label}`,
-    });
+    add(item, col, row, `together in ${zone.label}`, { rot: i === 0 ? 270 : 90, flip: i === 1 });
   });
 
   return out;

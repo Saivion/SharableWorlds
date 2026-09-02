@@ -21,6 +21,7 @@ import { DECK_BLOCK, ELEV, PLINTH_DEPTH, TILE, worldOf } from "@/lib/composition
 import { environmentBounds, reservedLots, surfaceAt } from "@/lib/composition/surface";
 import { snapLotCoord } from "@/lib/iso";
 import { registerLotProjector } from "@/lib/stageProjection";
+import { registerSnapshot } from "@/lib/stageSnapshot";
 import { useTown } from "@/lib/store";
 import { humanFlip, humanMove, humanPlace, lotId, occupancyMap, parseLot } from "@/lib/town";
 import { Environment3D } from "./Environment3D";
@@ -81,6 +82,63 @@ function zoomPx(viewportW: number, zoom: number) {
   return (viewportW / BASE_VIEW_W) * zoom;
 }
 
+/** Lot-space extent of everything built: the environment footprint plus
+ * any piece standing outside it. Null when the world is empty. */
+function worldExtent(state: ReturnType<typeof useTown.getState>) {
+  const bounds = environmentBounds(state.environment);
+  let minC = bounds ? bounds.c0 : Infinity;
+  let maxC = bounds ? bounds.c0 + bounds.w - 1 : -Infinity;
+  let minR = bounds ? bounds.r0 : Infinity;
+  let maxR = bounds ? bounds.r0 + bounds.d - 1 : -Infinity;
+  for (const piece of Object.values(state.pieces)) {
+    const l = parseLot(piece.lot);
+    if (!l) continue;
+    minC = Math.min(minC, l.col);
+    maxC = Math.max(maxC, l.col);
+    minR = Math.min(minR, l.row);
+    maxR = Math.max(maxR, l.row);
+  }
+  if (!Number.isFinite(minC)) return null;
+  return { minC, maxC, minR, maxR };
+}
+
+/** Puts an orthographic camera on the iso rail, aimed at (tx, 0, tz). */
+function placeOnRail(cam: THREE.OrthographicCamera, tx: number, tz: number) {
+  cam.position.set(tx + CAM_DIST * SIN_AZ * COS_EL, CAM_DIST * SIN_EL, tz + CAM_DIST * COS_AZ * COS_EL);
+  cam.lookAt(tx, 0, tz);
+}
+
+/**
+ * A camera that frames the whole world regardless of where the person has
+ * panned or zoomed: same iso angle, centered on the world, zoomed out until
+ * every corner of its bounding box (floor of the plinth to the tallest
+ * tower) projects inside the viewport. The sticker crops to painted pixels
+ * afterwards, so generous headroom costs nothing.
+ */
+function framingCamera(base: THREE.OrthographicCamera, viewportW: number, extent: NonNullable<ReturnType<typeof worldExtent>>) {
+  const cam = base.clone();
+  const cx = ((extent.minC + extent.maxC) / 2) * TILE;
+  const cz = ((extent.minR + extent.maxR) / 2) * TILE;
+  placeOnRail(cam, cx, cz);
+  cam.zoom = zoomPx(Math.max(1, viewportW), 1);
+  cam.updateProjectionMatrix();
+  cam.updateMatrixWorld(true);
+  const x0 = (extent.minC - 1.5) * TILE, x1 = (extent.maxC + 1.5) * TILE;
+  const z0 = (extent.minR - 1.5) * TILE, z1 = (extent.maxR + 1.5) * TILE;
+  const y0 = -PLINTH_DEPTH - 0.5, y1 = 10;
+  const v = new THREE.Vector3();
+  let reach = 0;
+  for (const x of [x0, x1]) for (const y of [y0, y1]) for (const z of [z0, z1]) {
+    v.set(x, y, z).project(cam);
+    reach = Math.max(reach, Math.abs(v.x), Math.abs(v.y));
+  }
+  // Orthographic projection scales linearly with zoom: shrink until the
+  // farthest corner sits at 92% of the half-viewport.
+  if (reach > 0) cam.zoom *= 0.92 / reach;
+  cam.updateProjectionMatrix();
+  return cam;
+}
+
 /** Keeps the default orthographic camera on the iso rail and registers the
  * lot → screen projector the agent cursor uses. */
 function CameraRig({
@@ -105,12 +163,7 @@ function CameraRig({
   useFrame(() => {
     const cam = camStore.state;
     const ortho = camera as THREE.OrthographicCamera;
-    ortho.position.set(
-      cam.tx + CAM_DIST * SIN_AZ * COS_EL,
-      CAM_DIST * SIN_EL,
-      cam.tz + CAM_DIST * COS_AZ * COS_EL,
-    );
-    ortho.lookAt(cam.tx, 0, cam.tz);
+    placeOnRail(ortho, cam.tx, cam.tz);
     ortho.zoom = Math.max(0.0001, zoomPx(Math.max(1, size.width), cam.zoom));
     ortho.near = -400;
     ortho.far = 800;
@@ -132,8 +185,21 @@ function CameraRig({
       };
     };
     registerLotProjector(project);
-    return () => registerLotProjector(null);
-  }, [camera, gl, surfaceYAt]);
+    // The share sticker asks for a fresh frame of the WHOLE world — rendered
+    // through a camera that frames it, not the person's current pan/zoom —
+    // then hands over the canvas. The next animation frame repaints the
+    // live view, so nothing of this shows on screen.
+    registerSnapshot(() => {
+      const extent = worldExtent(useTown.getState());
+      const cam = extent ? framingCamera(camera as THREE.OrthographicCamera, size.width, extent) : camera;
+      gl.render(scene, cam);
+      return gl.domElement;
+    });
+    return () => {
+      registerLotProjector(null);
+      registerSnapshot(null);
+    };
+  }, [camera, gl, scene, size.width, surfaceYAt]);
 
   return null;
 }
@@ -371,22 +437,9 @@ export function Stage3D() {
   // Ease the camera to frame the scene when a build lands.
   useEffect(() => {
     if (focusToken === 0) return;
-    const state = useTown.getState();
-    const bounds = environmentBounds(state.environment);
-    const lots = Object.values(state.pieces)
-      .map((p) => parseLot(p.lot))
-      .filter((p): p is { col: number; row: number } => Boolean(p));
-    let minC = bounds ? bounds.c0 : Infinity;
-    let maxC = bounds ? bounds.c0 + bounds.w - 1 : -Infinity;
-    let minR = bounds ? bounds.r0 : Infinity;
-    let maxR = bounds ? bounds.r0 + bounds.d - 1 : -Infinity;
-    for (const l of lots) {
-      minC = Math.min(minC, l.col);
-      maxC = Math.max(maxC, l.col);
-      minR = Math.min(minR, l.row);
-      maxR = Math.max(maxR, l.row);
-    }
-    if (!Number.isFinite(minC)) return;
+    const extent = worldExtent(useTown.getState());
+    if (!extent) return;
+    const { minC, maxC, minR, maxR } = extent;
     const cx = ((minC + maxC) / 2) * TILE;
     const cz = ((minR + maxR) / 2) * TILE + TILE; // bias down — leaves headroom above
     const spanW = (maxC - minC + 6) * TILE;
@@ -584,7 +637,10 @@ export function Stage3D() {
         orthographic
         shadows="percentage"
         dpr={[1.5, 2]}
-        gl={{ antialias: true, alpha: true, powerPreference: "high-performance", stencil: false }}
+        // preserveDrawingBuffer: the share sticker reads the last frame back
+        // from the canvas; without it the buffer is discarded after compositing
+        // and toDataURL returns a blank image.
+        gl={{ antialias: true, alpha: true, powerPreference: "high-performance", stencil: false, preserveDrawingBuffer: true }}
         onCreated={({ gl }) => {
           gl.toneMapping = THREE.ACESFilmicToneMapping;
           gl.toneMappingExposure = 1.06;
@@ -632,7 +688,7 @@ export function Stage3D() {
               rotation-x={-Math.PI / 2}
               position={[
                 (p.rect.c0 + (p.rect.w - 1) / 2) * TILE,
-                p.level * ELEV + (p.inset ? 0.06 : 0) + DECK_BLOCK + 0.02,
+                p.level * ELEV + (p.lift ?? 0) + (p.inset ? 0.06 : 0) + DECK_BLOCK + 0.02,
                 (p.rect.r0 + (p.rect.d - 1) / 2) * TILE,
               ]}
               onPointerMove={onSurfaceMove}

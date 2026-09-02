@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:seeds": "npx -y tsx scripts/test-seeds.ts"
+    "test:seeds": "npx -y tsx scripts/test-seeds.ts",
+    "test:scenes": "npx -y tsx scripts/test-scenes.ts",
+    "test": "npm run test:seeds && npm run test:scenes"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.8",
