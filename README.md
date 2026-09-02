@@ -165,3 +165,7 @@ Composition logic lives in `lib/composition/` (intent, archetypes, compose, vali
 ## Credits
 
 All art is [Kenney](https://kenney.nl), CC0 — Mini Arcade, Arena, Characters, Dungeon, Forest, Market, Skate, Watercraft, Pirate Kit, Car Kit, and more. See `public/assets/kenney/LICENSE-kenney.txt`.
+
+## Deploy
+
+The site is a static export served by a Cloudflare Worker. `npm run cf:deploy` builds and ships it; see [docs/DEPLOY-CLOUDFLARE.md](docs/DEPLOY-CLOUDFLARE.md) for login, custom domains, and CI.

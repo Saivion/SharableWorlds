@@ -1,0 +1,31 @@
+// Cloudflare Worker for SharableWorlds.
+//
+// `next build` writes the static export to ./out; the Worker serves it through
+// the Static Assets binding and adds cache/security headers (see worker/).
+//
+//   npm run cf:preview   build + run locally on http://localhost:8787
+//   npm run cf:deploy    build + deploy to your Cloudflare account
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sharableworlds",
+  "main": "worker/index.ts",
+  "compatibility_date": "2025-12-01",
+  // Keep the Worker's own source map out of the upload as well.
+  "upload_source_maps": false,
+  "assets": {
+    "directory": "./out",
+    "binding": "ASSETS",
+    // Run the Worker for every request (by default exact asset matches skip
+    // it), so cache and security headers apply to the whole site.
+    "run_worker_first": true,
+    // /foo → /foo.html, /foo/ → /foo/index.html; the export has both shapes.
+    "html_handling": "auto-trailing-slash",
+    // Unknown paths get index.html with a 200 — the app reads the URL itself.
+    "not_found_handling": "single-page-application"
+  },
+  "observability": {
+    "enabled": true
+  }
+  // Custom domain: uncomment and set your zone's hostname, then deploy.
+  // "routes": [{ "pattern": "worlds.example.com", "custom_domain": true }]
+}
