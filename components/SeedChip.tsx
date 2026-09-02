@@ -41,24 +41,25 @@ export function SeedChip() {
     }
   };
 
-
   const remix = () => {
     void callTownTool("regenerate_scene", {}, "ui");
   };
 
   return (
     <div className="seed-chip" data-busy={agentBusy || undefined}>
-      <button type="button" className="seed-chip-seed" onClick={copySeed} title="Copy seed">
-        <span className="seed-chip-label">seed</span>
-        <span className="seed-chip-value">{meta.seed}</span>
+      <button type="button" className="seed-chip__seed" onClick={copySeed} title="Copy seed">
+        <span className="seed-chip__label">Seed</span>
+        <span className="seed-chip__value">{meta.seed}</span>
       </button>
-      <button type="button" className="seed-chip-btn" onClick={() => setShareOpen(true)} title="Share this world as a sticker">
-        Share
-      </button>
-      <button type="button" className="seed-chip-btn" onClick={remix} disabled={agentBusy} title="New seed, new take on the same scene">
-        Remix
-      </button>
-      {flash && <span className="seed-chip-flash">{flash}</span>}
+      <div className="seed-chip__actions">
+        <button type="button" className="gloss-btn" onClick={() => setShareOpen(true)} title="Share this world as a sticker">
+          Share
+        </button>
+        <button type="button" className="seed-chip__remix" onClick={remix} disabled={agentBusy} title="New seed, new take on the same scene">
+          Remix
+        </button>
+      </div>
+      {flash && <span className="seed-chip__flash">{flash}</span>}
       {shareOpen && <ShareCard onClose={() => setShareOpen(false)} />}
     </div>
   );

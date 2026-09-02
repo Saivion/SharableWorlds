@@ -15,6 +15,10 @@ export function SurprisePill() {
   const busy = useTown((s) => s.agentBusy);
   const goal = useTown((s) => s.nudgeGoal);
   const setNudgeGoal = useTown((s) => s.setNudgeGoal);
+  const meta = useTown((s) => s.sceneMeta);
+  const environment = useTown((s) => s.environment);
+  const pieces = useTown((s) => s.pieces);
+  const invite = !meta && !environment && Object.keys(pieces).length === 0 && !busy;
   const [spinning, setSpinning] = useState(false);
   const timer = useRef<number | null>(null);
 
@@ -36,7 +40,7 @@ export function SurprisePill() {
   };
 
   return (
-    <div className="surprise-anchor">
+    <div className="surprise-anchor" data-invite={invite || undefined}>
       <button
         type="button"
         className="gloss-btn"

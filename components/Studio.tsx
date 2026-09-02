@@ -4,6 +4,7 @@ import { useEffect, useState, type CSSProperties } from "react";
 import { parseShareParams } from "@/lib/composition/seed";
 import { runGoalBuild } from "@/lib/goalRunner";
 import { callTownTool, registerTownTools, TOWN_TOOLS } from "@/lib/town";
+import { EmptyWelcome } from "./EmptyWelcome";
 import { SeedChip } from "./SeedChip";
 import { AGENT_ACCENT, useTown } from "@/lib/store";
 import type { ToolMode } from "@/lib/types";
@@ -33,7 +34,7 @@ export function Studio() {
   const [retry, setRetry] = useState(0);
   const [hotId, setHotId] = useState<string | null>(null);
   const hot = railHotHandlers();
-  const { aboutOpen, aboutClosing, closeAbout, toggleAbout } = useAboutDialog();
+  const { aboutOpen, aboutClosing, aboutReady, closeAbout, toggleAbout } = useAboutDialog();
 
   useEffect(() => {
     const controller = new AbortController();
@@ -193,6 +194,7 @@ export function Studio() {
         {lastError && <div className="studio-error">{lastError}</div>}
       </footer>
 
+      <EmptyWelcome quiet={!aboutReady || aboutOpen || aboutClosing} />
       <div className="studio-hint">
         Select to drag objects · F to flip toward each other · pick a piece, click anywhere · Space + drag to pan · scroll to zoom
       </div>

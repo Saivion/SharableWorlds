@@ -37,6 +37,8 @@ function pickSprites(): PlacedSprite[] {
 export function useAboutDialog() {
   const [open, setOpen] = useState(false);
   const [closing, setClosing] = useState(false);
+  /** False until localStorage is read — avoids flashing EmptyWelcome before About. */
+  const [ready, setReady] = useState(false);
   const timer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -45,6 +47,7 @@ export function useAboutDialog() {
     } catch {
       setOpen(true);
     }
+    setReady(true);
     return () => {
       if (timer.current != null) window.clearTimeout(timer.current);
     };
@@ -75,7 +78,7 @@ export function useAboutDialog() {
     setOpen(true);
   }, [open, closing, closeAbout]);
 
-  return { aboutOpen: open, aboutClosing: closing, closeAbout, toggleAbout };
+  return { aboutOpen: open, aboutClosing: closing, aboutReady: ready, closeAbout, toggleAbout };
 }
 
 type Props = {
@@ -136,19 +139,22 @@ export function AboutDialog({ open, closing, onClose }: Props) {
           </button>
           <p className="about-kicker">SharableWorlds</p>
           <h2 id="about-title" className="about-title">
-            A shared lot map
+            Build a world you can share
           </h2>
           <p className="about-body">
-            Pick a piece from the kit and click a tile. Anything you place or
-            paint is locked against the agent.
+            Tap <strong>Surprise Me</strong> to generate a seeded diorama — or
+            open the kit, place a piece, and let an agent build around what you
+            lock down.
           </p>
           <p className="about-body">
-            Tap Surprise Me to hand it a standing goal. In a WebMCP-enabled
-            browser it reads the map, plans, and fills the empty lots around
-            yours.
+            Every world gets a seed. Share the link and anyone rebuilds the
+            same place.
           </p>
-          <button type="button" className="about-start" onClick={onClose}>
-            Start building
+          <button type="button" className="gloss-btn about-start" onClick={onClose}>
+            <span className="gloss-btn__spark" aria-hidden>
+              ✦
+            </span>{" "}
+            Got it
           </button>
         </div>
       </div>

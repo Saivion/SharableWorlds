@@ -80,6 +80,9 @@ export type WallSpec = {
   /** Seeded palette (hex) — plaster by default. */
   color?: string;
   cap?: string;
+  /** When set, the wall is laid in the same blocks as the ground of this
+   * material — the building reads as raised foundation, not a plaster slab. */
+  material?: PlatformMaterial;
 };
 
 export type StairSpec = {

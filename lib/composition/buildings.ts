@@ -78,7 +78,7 @@ const TRIMS: Partial<Record<ZoneType, PlatformMaterial[]>> = {
 
 const STYLES: BuildingStyle[] = ["corner", "three", "hall", "parapet", "open", "corner", "three"];
 
-const PARAPET_HEIGHT = 0.55;
+const PARAPET_HEIGHT = 0.62;
 
 function pick<T>(list: T[], rng: () => number): T {
   return list[Math.floor(rng() * list.length)];
@@ -132,7 +132,7 @@ export function planBuilding(opts: {
   const style = pick(STYLES, rng);
   const names = THEME_PALETTES[theme.id] ?? ["plaster", "whitewash", "timber", "stone", "brick"];
   const palette = PALETTES.find((p) => p.id === pick(names, rng)) ?? PALETTES[0];
-  const baseHeight = { corner: 1.7, three: 1.8, hall: 2.2, parapet: 1.6, open: 1.5 }[style];
+  const baseHeight = { corner: 1.9, three: 2.0, hall: 2.45, parapet: 1.8, open: 1.7 }[style];
   const height = Math.round(baseHeight * (0.92 + rng() * 0.2) * 100) / 100;
 
   // Back sides: the two sides away from the stair, north/west favoured so
@@ -177,7 +177,8 @@ export function planBuilding(opts: {
     const trims = (TRIMS[type] ?? ["moss", "terracotta"]).filter((m) => m !== floor);
     platforms.push({ id: `${id}-floor-inner`, rect: { c0: rect.c0 + 1, r0: rect.r0 + 1, w: rect.w - 2, d: rect.d - 2 }, level: 1, material: pick(trims, rng), inset: true });
   }
-  return { style, platforms, walls, stair, walled, height, palette: palette.id };
+  // Walls rise in the same blocks as the terrace they stand on.
+  return { style, platforms, walls: walls.map((w) => ({ ...w, material: floor })), stair, walled, height, palette: palette.id };
 }
 
 /** Which sides of `rect` carry a full-height wall in `env` (parapets don't count). */

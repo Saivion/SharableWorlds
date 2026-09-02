@@ -191,6 +191,33 @@ textarea {
   align-items: center;
 }
 
+.surprise-anchor[data-invite] .gloss-btn {
+  animation: surprise-invite 2.4s ease-in-out infinite;
+}
+
+.surprise-anchor[data-invite] .gloss-btn__spark {
+  animation: surprise-spin 2.4s ease-in-out infinite;
+}
+
+@keyframes surprise-invite {
+  0%,
+  100% {
+    box-shadow:
+      0 1.5px 0 rgba(255, 255, 255, 0.28) inset,
+      0 -3px 6px rgba(0, 0, 0, 0.45) inset,
+      0 6px 16px rgba(0, 0, 0, 0.22),
+      0 1px 3px rgba(0, 0, 0, 0.18),
+      0 0 0 0 color-mix(in srgb, var(--agent-accent, #236ffd) 0%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 1.5px 0 rgba(255, 255, 255, 0.28) inset,
+      0 -3px 6px rgba(0, 0, 0, 0.45) inset,
+      0 8px 20px rgba(0, 0, 0, 0.28),
+      0 0 0 6px color-mix(in srgb, var(--agent-accent, #236ffd) 18%, transparent);
+  }
+}
+
 /* Agent Building — centered, sidebar chrome ---------------------------- */
 
 .agent-build-anchor {
@@ -428,6 +455,13 @@ textarea {
   color: #b23b3b;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .surprise-anchor[data-invite] .gloss-btn,
+  .surprise-anchor[data-invite] .gloss-btn__spark {
+    animation: none !important;
+  }
+}
+
 @media (max-width: 560px) {
   .studio-wordmark {
     display: none;
@@ -439,6 +473,11 @@ textarea {
 
   .agent-build[data-open] {
     --agent-build-w: min(92vw, 340px);
+  }
+
+  .empty-welcome__card {
+    width: min(90vw, 300px);
+    padding: 18px 18px 16px;
   }
 }
 
@@ -1274,14 +1313,6 @@ textarea {
 .about-start {
   align-self: flex-start;
   margin-top: 10px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--ink);
-  color: var(--paper);
-  padding: 8px 16px;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
 }
 
 @keyframes about-scrim-in {
@@ -1377,86 +1408,183 @@ textarea {
   pointer-events: none;
 }
 
-/* Seed chip — the scene's procedural identity, bottom-right --------------- */
+/* Seed chip — scene identity, bottom-right, matches chrome ------------ */
 
 .seed-chip {
   position: absolute;
-  right: 22px;
-  bottom: 20px;
+  right: 18px;
+  bottom: 18px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
+  gap: 10px;
+  padding: 6px 6px 6px 10px;
   background: #ffffff;
-  border: 1px solid var(--line, #e6e6e6);
-  border-radius: 12px;
-  box-shadow: 0 6px 18px rgba(10, 10, 10, 0.07);
+  border: var(--chrome-border);
+  border-radius: 14px;
+  box-shadow: var(--chrome-shadow);
   z-index: 6;
-  font-size: 11px;
 }
 
-.seed-chip-seed {
+.seed-chip__seed {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
   border: 0;
   background: none;
-  padding: 2px 6px;
+  padding: 2px 4px;
   border-radius: 8px;
   cursor: copy;
   font: inherit;
+  min-width: 0;
 }
 
-.seed-chip-seed:hover {
-  background: #f4f4f4;
+.seed-chip__seed:hover {
+  background: var(--soft);
 }
 
-.seed-chip-label {
+.seed-chip__label {
   font-size: 9px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: #a4a4a4;
-}
-
-.seed-chip-value {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--ink, #0a0a0a);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  line-height: 1;
 }
 
-.seed-chip-btn {
-  border: 1px solid var(--line, #e6e6e6);
-  background: #fafafa;
-  border-radius: 8px;
-  padding: 3px 9px;
+.seed-chip__value {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  line-height: 1.2;
+}
+
+.seed-chip__actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.seed-chip__remix {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line-strong);
+  background: #ffffff;
+  border-radius: 10px;
+  padding: 5px 12px;
   font: inherit;
-  font-size: 10.5px;
+  font-size: 14px;
+  font-weight: 620;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
   color: #3a3a3a;
   cursor: pointer;
+  white-space: nowrap;
+  transition:
+    transform 180ms var(--ease-out),
+    background 140ms var(--ease-out),
+    color 140ms var(--ease-out);
 }
 
-.seed-chip-btn:hover:not(:disabled) {
-  background: #efefef;
-  color: var(--ink, #0a0a0a);
+.seed-chip__remix:hover:not(:disabled) {
+  transform: scale(1.06);
+  background: var(--soft);
+  color: var(--ink);
 }
 
-.seed-chip-btn:disabled {
+.seed-chip__remix:disabled {
   opacity: 0.45;
   cursor: default;
 }
 
-.seed-chip-flash {
+.seed-chip__flash {
   position: absolute;
-  right: 4px;
-  top: -22px;
-  padding: 2px 8px;
-  background: var(--ink, #0a0a0a);
+  right: 6px;
+  top: -24px;
+  padding: 3px 9px;
+  background: var(--ink);
   color: #ffffff;
-  border-radius: 7px;
+  border-radius: 8px;
   font-size: 10px;
+  font-weight: 600;
   white-space: nowrap;
+  animation: agent-drop-in 180ms var(--ease-out);
+}
+
+/* Empty canvas — first visit / no scene yet ----------------------------- */
+
+.empty-welcome {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  pointer-events: none;
+}
+
+.empty-welcome__card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: min(88vw, 340px);
+  padding: 22px 24px 20px;
+  text-align: center;
+  background: #ffffff;
+  border: var(--chrome-border);
+  border-radius: 18px;
+  box-shadow: var(--chrome-shadow);
+  pointer-events: auto;
+  opacity: 1;
+}
+
+.empty-welcome__kicker {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--agent-accent, #236ffd);
+}
+
+.empty-welcome__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+  color: var(--ink);
+}
+
+.empty-welcome__body {
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #5a5a5a;
+}
+
+.empty-welcome__body strong {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.empty-welcome__cta {
+  margin-top: 16px;
+}
+
+.empty-welcome__hint {
+  margin: 10px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.studio:has(.empty-welcome) .studio-hint {
+  opacity: 0;
 }
 
 /* (Surprise + Agent Building styles live with the top chrome above) ----- */

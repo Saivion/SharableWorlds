@@ -8,6 +8,7 @@ import { understandIntent, type SceneIntent } from "./intent";
 import { facingVector } from "./layout";
 import { pickItems } from "./pick";
 import { roleOf } from "./roles";
+import { waterCells, waterNeed, WATER_DENSITY } from "./density";
 import { clearanceLots } from "./scale3d";
 import { deriveSeed } from "./seed";
 import { selectItems } from "./select";
@@ -703,12 +704,14 @@ export const SCENE_RULES: SceneRule[] = [
     when: hasEnv,
     check: (ctx) => {
       const land = landCellCount(ctx.env);
-      const density = land ? ctx.located.length / land : 0;
+      // Boats and buoys ride on the water; they neither crowd nor fill the ground.
+      const ashore = ctx.located.filter((l) => platformAt(ctx.env, l.at.col, l.at.row)).length;
+      const density = land ? ashore / land : 0;
       const ok = density >= 0.28 && density <= 0.75;
       return {
         ok,
         score: ok ? 1 : density < 0.28 ? density / 0.28 : Math.max(0, 1 - (density - 0.75)),
-        note: !land ? "no deck to measure" : density < 0.28 ? `sparse (${ctx.located.length} pieces on ${land} cells) — bare ground shows` : density > 0.75 ? `crowded (${ctx.located.length} pieces on ${land} cells) — remove clutter, keep breathing room` : "the ground is full without being packed",
+        note: !land ? "no deck to measure" : density < 0.28 ? `sparse (${ashore} pieces on ${land} cells) — bare ground shows` : density > 0.75 ? `crowded (${ashore} pieces on ${land} cells) — remove clutter, keep breathing room` : "the ground is full without being packed",
         fix: density < 0.28 ? "create_environment (texture fills the open ground)" : density > 0.75 ? "remove_piece the least purposeful clutter" : undefined,
         repairs: !ok && density < 0.28 ? [{ tool: "create_environment", args: {}, why: "the scene is sparse" }] : [],
       };
@@ -741,6 +744,27 @@ export function coverageOf(env: EnvironmentSpec | null, located: RuleContext["lo
   }
   return land ? covered / land : 0;
 }
+
+SCENE_RULES.push({
+  id: "water_dressed",
+  law: "Water is a place too — buoys, rocks and boats at anchor, never an empty blue field.",
+  kind: "environment",
+  dimension: "environment",
+  weight: 1,
+  when: (ctx) => hasEnv(ctx) && waterCells(ctx.env!).length >= 12,
+  check: (ctx) => {
+    const need = waterNeed(ctx.env!, ctx.located.map((l) => l.at));
+    const want = Math.max(3, Math.round(waterCells(ctx.env!).length * WATER_DENSITY));
+    const have = want - need;
+    return {
+      ok: need === 0,
+      score: Math.min(1, have / want),
+      note: need === 0 ? `the water is dressed (${have} afloat)` : `bare water — ${have} of ${want} pieces afloat`,
+      fix: need === 0 ? undefined : "create_environment (moors boats, buoys and rocks on the open water)",
+      repairs: need === 0 ? [] : [{ tool: "create_environment", args: {}, why: "the water is empty" }],
+    };
+  },
+});
 
 SCENE_RULES.push({
   id: "coverage",

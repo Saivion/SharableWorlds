@@ -20,7 +20,7 @@ import {
 } from "./island";
 import { createSeededRandom, deriveSeed, generateSceneSeed, isValidSeed, normalizeSeed } from "./seed";
 import { selectItems } from "./select";
-import { fillToDensity, keepClearFor } from "./density";
+import { fillToDensity, fillWater, keepClearFor } from "./density";
 import { planRelief, reliefIntensity } from "./relief";
 import { paintTerrain, planBoundary, withWaterPaint } from "./terrain";
 import { resolveTheme } from "./themes";
@@ -771,6 +771,7 @@ export function composeScenePlan(
       keepClear: keepClearFor(env, zones.flatMap((z) => (z.focal ? [z.focal] : [])), pathCells[0] ?? null),
     }),
   );
+  placements.push(...fillWater({ env, board, seed: seedStr, keepClear: keepClearFor(env, zones.flatMap((z) => (z.focal ? [z.focal] : [])), pathCells[0] ?? null) }));
 
   // Tag every placement with its zone and build phase so the staged tools
   // (populate_zones / create_environment) and the validator can read the

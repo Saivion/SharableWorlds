@@ -18,7 +18,7 @@ import {
   type IslandMask,
 } from "./island";
 import { Board, faceToward, facingVector, groupByRole, key, planZones, type OccupiedBody, type Placement, type PlanPhase } from "./layout";
-import { fillToDensity, keepClearFor } from "./density";
+import { fillToDensity, fillWater, keepClearFor } from "./density";
 import { cycleItems, pickItems } from "./pick";
 import { roleOf } from "./roles";
 import { clearanceLots } from "./scale3d";
@@ -878,6 +878,8 @@ function fillTexture(ctx: Ctx, archetype: Archetype, theme: ThemeSpec) {
     keepClear: keepClearFor(ctx.env, focals, ctx.entrance),
   });
   ctx.placements.push(...added);
+  // The water gets the same treatment: buoys, rocks, boats at anchor.
+  ctx.placements.push(...fillWater({ env: ctx.env, board: ctx.board, seed: ctx.seed, keepClear: keepClearFor(ctx.env, focals, ctx.entrance) }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1079,14 +1081,17 @@ export function programTexture(
   for (const s of env.stairs) board.taken.add(key(s.at.col, s.at.row));
   const focals = env.zones.flatMap((z) => (z.focal ? [z.focal] : []));
   const entrance = env.paths.find((p) => p.id === "entrance")?.cells[0] ?? null;
-  return fillToDensity({
+  const keepClear = keepClearFor(env, focals, entrance);
+  const water = fillWater({ env, board, seed: `${seed}-live`, keepClear, max: Math.min(max, 20) });
+  const land = fillToDensity({
     env,
     board,
     theme: intent.theme,
     seed: `${seed}-live`,
     placed: [...occupied].length,
     target: intent.archetype?.density,
-    keepClear: keepClearFor(env, focals, entrance),
+    keepClear,
     max,
   });
+  return [...land, ...water];
 }

@@ -14,6 +14,7 @@ import {
   type ZoneLocation,
   type ZoneSize,
 } from "./composition/ops";
+import { waterNeed } from "./composition/density";
 import { programTexture, programZone } from "./composition/program";
 import { coverageOf, COVERAGE_TARGET, buildRuleContext } from "./composition/rules";
 import { bodiesCollide, clearanceLots } from "./composition/scale3d";
@@ -1759,7 +1760,9 @@ export const TOWN_TOOLS: ModelContextTool[] = [
       // the scene's density — the repair for bare ground.
       {
         const ctxNow = buildRuleContext(env, useTown.getState().pieces);
-        if (coverageOf(env, ctxNow.located) < COVERAGE_TARGET || !todos.length) {
+        const bare = coverageOf(env, ctxNow.located) < COVERAGE_TARGET;
+        const sea = waterNeed(env, ctxNow.located.map((l) => l.at)) > 0;
+        if (bare || sea || !todos.length) {
           const intent = plan?.intent ?? understandIntent(state.sceneMeta?.prompt ?? state.nudgeGoal ?? "");
           const occupied = piecesList().flatMap((p) => {
             const at = parseLot(p.lot);

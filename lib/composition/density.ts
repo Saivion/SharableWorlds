@@ -186,3 +186,157 @@ export function keepClearFor(env: EnvironmentSpec, focals: { col: number; row: n
   if (entrance) clear.add(cellKey(entrance.col, entrance.row));
   return clear;
 }
+
+// ---------------------------------------------------------------------------
+// The water pass — the sea is dressed the way the land is.
+// ---------------------------------------------------------------------------
+
+/** Target pieces per open water cell. Water should still read as water:
+ * sparser than land, densest along the shore, one big vessel at most. */
+export const WATER_DENSITY = 0.12;
+
+// Plain buoys twice as often as the tall flagged one — a shoreline of red
+// posts reads as a fence, not a channel.
+const WATER_MARKS = ["watercraft-buoy", "watercraft-buoy", "watercraft-buoy-flag"];
+const WATER_ROCKS = ["pirate-rocks-a", "pirate-rocks-b", "pirate-rocks-c"];
+const WATER_SMALL = [
+  "watercraft-boat-row-small",
+  "watercraft-boat-row-large",
+  "pirate-boat-row-small",
+  "pirate-boat-row-large",
+  "watercraft-boat-fishing-small",
+  "watercraft-boat-sail-a",
+  "watercraft-boat-speed-a",
+  "watercraft-boat-speed-b",
+  "watercraft-boat-speed-c",
+];
+const WATER_BIG = ["watercraft-boat-sail-b", "watercraft-boat-tug-a", "watercraft-boat-house-a", "watercraft-boat-house-b", "watercraft-ship-small"];
+
+/** Every water cell with nothing built over it (piers and decks excluded). */
+export function waterCells(env: EnvironmentSpec): { col: number; row: number }[] {
+  const out: { col: number; row: number }[] = [];
+  const seen = new Set<string>();
+  for (const w of env.water) {
+    for (let r = w.rect.r0; r < w.rect.r0 + w.rect.d; r += 1) {
+      for (let c = w.rect.c0; c < w.rect.c0 + w.rect.w; c += 1) {
+        const k = cellKey(c, r);
+        if (seen.has(k) || platformAt(env, c, r)) continue;
+        seen.add(k);
+        out.push({ col: c, row: r });
+      }
+    }
+  }
+  return out;
+}
+
+/** How many more pieces the water wants, given what already floats on it. */
+export function waterNeed(env: EnvironmentSpec, occupied: Iterable<{ col: number; row: number }>): number {
+  const water = waterCells(env);
+  if (water.length < 6) return 0;
+  const cells = new Set(water.map((c) => cellKey(c.col, c.row)));
+  let afloat = 0;
+  for (const b of occupied) if (cells.has(cellKey(b.col, b.row))) afloat += 1;
+  return Math.max(0, Math.max(3, Math.round(water.length * WATER_DENSITY)) - afloat);
+}
+
+export type WaterOptions = {
+  env: EnvironmentSpec;
+  board: Board;
+  seed: string;
+  /** Cells that stay open — the flagship's ring, the dock approach. */
+  keepClear: Set<string>;
+  /** Hard cap on pieces this pass may add. */
+  max?: number;
+};
+
+/**
+ * Dress the water: buoys marking the channel and rocks off the shore, small
+ * boats riding at anchor further out, and — on a big enough sea — one larger
+ * vessel. Everything claims the engine's own clearance, keeps off the pier
+ * approach, and stops at WATER_DENSITY so the sea keeps its negative space.
+ */
+export function fillWater(opts: WaterOptions): Placement[] {
+  const { env, board, seed, keepClear } = opts;
+  const water = waterCells(env);
+  const out: Placement[] = [];
+  const need = Math.min(opts.max ?? 28, waterNeed(env, board.bodies));
+  if (!need) return out;
+  const rng = createSeededRandom(deriveSeed(seed, "water"));
+  const ps = deriveSeed(seed, "water:pools");
+  // pickItems dedupes, so weight by repeating ids here rather than there.
+  const usable = (ids: string[]) => ids.flatMap((id) => pickItems({ ids: [id] }, ps, 1)).filter((i) => i.model && !isTilesetJunk(i));
+  const pools = { marks: usable(WATER_MARKS), rocks: usable(WATER_ROCKS), small: usable(WATER_SMALL), big: usable(WATER_BIG) };
+  if (!pools.small.length && !pools.marks.length) return out;
+
+  const isWater = (col: number, row: number) => env.water.some((w) => rectContains(w.rect, col, row)) && !platformAt(env, col, row);
+  const nearLand = (col: number, row: number) => {
+    for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) if (platformAt(env, col + dc, row + dr)) return true;
+    return false;
+  };
+  // The dock stays reachable: nothing moors on the cells touching the pier.
+  const pier = env.platforms.find((p) => p.id === "pier");
+  const pierSide = (col: number, row: number) => {
+    if (!pier) return false;
+    for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]] as const)
+      if (rectContains(pier.rect, col + dc, row + dr)) return true;
+    return false;
+  };
+  const shuffle = <T,>(list: T[]) => {
+    const a = [...list];
+    for (let i = a.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(rng() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  };
+  const open = water.filter((c) => !keepClear.has(cellKey(c.col, c.row)) && !board.taken.has(key(c.col, c.row)) && !pierSide(c.col, c.row));
+  const shore = shuffle(open.filter((c) => nearLand(c.col, c.row)));
+  const deep = shuffle(open.filter((c) => !nearLand(c.col, c.row)));
+  // Interleave so the fill spreads: shore, deep, shore, deep…
+  const order: { col: number; row: number; shore: boolean }[] = [];
+  for (let i = 0; i < Math.max(shore.length, deep.length); i += 1) {
+    if (shore[i]) order.push({ ...shore[i], shore: true });
+    if (deep[i]) order.push({ ...deep[i], shore: false });
+  }
+  const harborZone = (col: number, row: number) => env.zones.find((z) => z.type === "harbor" && rectContains(z.rect, col, row));
+  let bigPlaced = false;
+  const wantBig = water.length >= 24 && pools.big.length > 0;
+
+  for (const cell of order) {
+    if (out.length >= need) break;
+    const roll = rng();
+    let list: CatalogItem[];
+    let reason: string;
+    if (cell.shore) {
+      if (roll < 0.3 && pools.marks.length) {
+        list = pools.marks;
+        reason = "marking the channel";
+      } else if (roll < 0.6 && pools.rocks.length) {
+        list = pools.rocks;
+        reason = "a rock off the shore";
+      } else {
+        list = pools.small;
+        reason = "pulled up by the shore";
+      }
+    } else if (wantBig && !bigPlaced && roll < 0.12) {
+      list = pools.big;
+      reason = "standing out to sea";
+    } else if (roll < 0.25 && pools.marks.length) {
+      list = pools.marks;
+      reason = "a buoy on the swell";
+    } else if (roll < 0.38 && pools.rocks.length) {
+      list = pools.rocks;
+      reason = "a rock breaking the surface";
+    } else {
+      list = pools.small;
+      reason = "riding at anchor";
+    }
+    if (!list.length) continue;
+    const item = list[Math.floor(rng() * list.length)];
+    if (!board.claim(cell.col, cell.row, false, isWater, clearanceLots(item), item.kind)) continue;
+    if (list === pools.big) bigPlaced = true;
+    const rot = [0, 90, 180, 270][Math.floor(rng() * 4)];
+    out.push({ item, col: cell.col, row: cell.row, ...(rot ? { rot } : {}), reason, zone: harborZone(cell.col, cell.row)?.id ?? "sea", role: "texture", phase: "environment" });
+  }
+  return out;
+}

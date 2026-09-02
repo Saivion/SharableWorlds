@@ -157,7 +157,8 @@ export function hash2(a: number, b: number): number {
 }
 
 function pick(palette: string[], h: number): string {
-  return palette[h % palette.length];
+  // Hashes are unsigned but callers shift them; keep the index in range.
+  return palette[Math.abs(h) % palette.length];
 }
 
 /** Shade inside the region's own palette, with occasional warm speckles. */
@@ -187,12 +188,38 @@ export function pathHex(col: number, row: number): string {
 const RUBBLE_CANDY = ["#f8f4ff", "#e894b4", "#8a5c44", "#fef6e2"];
 const RUBBLE_COLD = ["#8ea4b8", "#7a92a8", "#a4b8c8", "#6a8298"];
 
-/** Debris tinted to its ground family — sprinkles on candy, scree on snow. */
+const PEBBLE_PALE = ["#cfcac0", "#bdb8ae", "#dcd7cc", "#aaa59b"];
+
+/** Darken a hex color by `k` (0..1). */
+function shade(hex: string, k: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  const f = (v: number) => Math.max(0, Math.min(255, Math.round(v * (1 - k))));
+  return `#${((f(n >> 16) << 16) | (f((n >> 8) & 255) << 8) | f(n & 255)).toString(16).padStart(6, "0")}`;
+}
+
+/** Debris tinted to its ground family — sprinkles on candy, scree on snow,
+ * and elsewhere a mix of dark stone, a darker shade of the ground itself,
+ * and the odd pale pebble. */
 export function rubbleHex(gx: number, gz: number, material?: PlatformMaterial): string {
   const family = material ?? "";
-  if (family.startsWith("candy")) return pick(RUBBLE_CANDY, hash2(gx + 3, gz + 9));
-  if (family === "snow" || family === "ice") return pick(RUBBLE_COLD, hash2(gx + 3, gz + 9));
-  return pick(RUBBLE, hash2(gx + 3, gz + 9));
+  const h = hash2(gx + 3, gz + 9);
+  if (family.startsWith("candy")) return pick(RUBBLE_CANDY, h);
+  if (family === "snow" || family === "ice") return pick(RUBBLE_COLD, h);
+  const roll = h % 10;
+  if (roll < 4) return pick(RUBBLE, h);
+  if (roll < 8 && material) return shade(pick(PALETTE[material] ?? GRASS, h >>> 2), 0.32);
+  return pick(PEBBLE_PALE, h >>> 3);
+}
+
+/** Rubble shape for a sub-lot: 0 a squared rock, 1 a rounded pebble, 2 a flat slab. */
+export function rubbleShape(gx: number, gz: number): 0 | 1 | 2 {
+  const r = hash2(gx + 21, gz + 5) % 10;
+  return r < 4 ? 0 : r < 8 ? 1 : 2;
+}
+
+/** Extra pebbles beside the rubble — small, rounded, a little more common. */
+export function isPebble(gx: number, gz: number): boolean {
+  return hash2(gx + 5, gz + 7) % 12 === 0;
 }
 
 /** Extra height on a minority of cubes so the floor is jagged, not a slab. */

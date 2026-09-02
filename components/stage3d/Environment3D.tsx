@@ -16,17 +16,7 @@ import {
   startFoundationWave,
   waveOrigin,
 } from "./legoDrop";
-import {
-  GROUND_SUB,
-  blockHex,
-  blockLift,
-  getGrainTexture,
-  hash2,
-  isRubble,
-  pathHexFor,
-  rubbleHex,
-  waterHex,
-} from "./terrainLook";
+import { GROUND_SUB, blockHex, blockLift, getGrainTexture, hash2, isPebble, isRubble, pathHexFor, rubbleHex, rubbleShape, waterHex } from "./terrainLook";
 
 /**
  * The architecture layer — everything the scene stands on. The island is
@@ -66,7 +56,11 @@ type Brick = {
   delay: number;
 };
 
-type RubbleBrick = Brick & { sx: number; sz: number };
+/** One bit of debris: which instanced mesh it lives in (`shape`), its slot
+ * there, and its own scale and spin. */
+type RubbleBrick = Brick & { sx: number; sz: number; ry: number; shape: 0 | 1 | 2; slot: number };
+
+const RUBBLE_SHAPES = 3;
 
 function GroundBlocks({
   rect,
@@ -94,7 +88,7 @@ function GroundBlocks({
   cellWaterTone?: (col: number, row: number) => WaterTone | undefined;
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
-  const rubbleRef = useRef<THREE.InstancedMesh>(null);
+  const rubbleRefs = useRef<(THREE.InstancedMesh | null)[]>([null, null, null]);
   const dummy = useMemo(() => new THREE.Object3D(), []);
   const born = useRef(0);
   const done = useRef(false);
@@ -105,25 +99,36 @@ function GroundBlocks({
   const size = TILE / sub;
   const count = Math.max(1, rect.w * rect.d * sub * sub);
 
+  type Spot = { gx: number; gz: number; x: number; z: number; shape: 0 | 1 | 2; pebble: boolean; slot: number };
   const rubbleSpots = useMemo(() => {
-    if (wet) return [] as { gx: number; gz: number; x: number; z: number }[];
-    const spots: { gx: number; gz: number; x: number; z: number }[] = [];
+    if (wet) return [] as Spot[];
+    const spots: Spot[] = [];
+    const slots = [0, 0, 0];
     for (let dr = 0; dr < rect.d; dr += 1) {
       for (let dc = 0; dc < rect.w; dc += 1) {
         for (let sz = 0; sz < sub; sz += 1) {
           for (let sx = 0; sx < sub; sx += 1) {
             const gx = (rect.c0 + dc) * sub + sx;
             const gz = (rect.r0 + dr) * sub + sz;
-            if (!isRubble(gx, gz)) continue;
+            const rubble = isRubble(gx, gz);
+            const pebble = !rubble && isPebble(gx, gz);
+            if (!rubble && !pebble) continue;
             const ox = (sx + 0.5 - sub / 2) * size;
             const oz = (sz + 0.5 - sub / 2) * size;
-            spots.push({ gx, gz, x: (rect.c0 + dc) * TILE + ox, z: (rect.r0 + dr) * TILE + oz });
+            const shape = pebble ? 1 : rubbleShape(gx, gz);
+            spots.push({ gx, gz, x: (rect.c0 + dc) * TILE + ox, z: (rect.r0 + dr) * TILE + oz, shape, pebble, slot: slots[shape] });
+            slots[shape] += 1;
           }
         }
       }
     }
     return spots;
   }, [rect.c0, rect.r0, rect.w, rect.d, wet, sub, size]);
+  const rubbleCounts = useMemo(() => {
+    const counts = [0, 0, 0];
+    for (const s of rubbleSpots) counts[s.shape] += 1;
+    return counts;
+  }, [rubbleSpots]);
 
   useLayoutEffect(() => {
     born.current = currentWave()?.born ?? performance.now();
@@ -170,35 +175,65 @@ function GroundBlocks({
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
 
-    const rubble = rubbleRef.current;
     const rubbleCells: RubbleBrick[] = [];
-    if (rubble) {
-      rubbleSpots.forEach((spot, ri) => {
+    if (rubbleRefs.current.some(Boolean)) {
+      rubbleSpots.forEach((spot) => {
+        const rubble = rubbleRefs.current[spot.shape];
+        if (!rubble) return;
         const h = hash2(spot.gx, spot.gz);
-        const s = 0.28 + (h % 5) * 0.04;
-        const rh = 0.18 + (h % 3) * 0.08;
-        const jx = ((h % 7) - 3) * 0.04;
-        const jz = (((h >> 3) % 7) - 3) * 0.04;
+        const jx = ((h % 7) - 3) * 0.05;
+        const jz = (((h >>> 3) % 7) - 3) * 0.05;
         const lift = blockLift(spot.gx, spot.gz);
-        rubbleCells.push({
+        const ry = ((h >>> 5) % 8) * (Math.PI / 8);
+        // Scale is relative to each shape's base geometry (0.4 rock, 0.22-radius
+        // pebble, 0.5×0.12×0.36 slab).
+        let sx: number, sy: number, sz: number, rh: number;
+        if (spot.shape === 0) {
+          const s = 0.26 + (h % 5) * 0.05;
+          rh = 0.16 + (h % 3) * 0.09;
+          sx = s / 0.4;
+          sy = rh / 0.4;
+          sz = (s * (0.85 + ((h >>> 2) % 3) * 0.12)) / 0.4;
+        } else if (spot.shape === 1) {
+          const s = spot.pebble ? 0.12 + (h % 4) * 0.03 : 0.2 + (h % 4) * 0.05;
+          rh = s * 0.75;
+          sx = s / 0.44;
+          sy = rh / 0.44;
+          sz = (s * (0.8 + ((h >>> 2) % 3) * 0.15)) / 0.44;
+        } else {
+          rh = 0.1 + (h % 2) * 0.04;
+          sx = 0.75 + (h % 4) * 0.15;
+          sy = rh / 0.12;
+          sz = 0.75 + ((h >>> 2) % 4) * 0.15;
+        }
+        const cell: RubbleBrick = {
           x: spot.x + jx,
           y: top + DECK_BLOCK + lift + rh / 2,
           z: spot.z + jz,
-          sx: s / 0.4,
-          sy: rh / 0.4,
-          sz: s / 0.4,
+          sx,
+          sy,
+          sz,
+          ry,
+          shape: spot.shape,
+          slot: spot.slot,
           delay: dropDelay(spot.gx, spot.gz, origin),
-        });
-        dummy.position.set(rubbleCells[ri].x, rubbleCells[ri].y + DROP, rubbleCells[ri].z);
+        };
+        rubbleCells.push(cell);
+        dummy.position.set(cell.x, cell.y + DROP, cell.z);
+        dummy.rotation.set(0, ry, 0);
         dummy.scale.set(0.04, 0.04, 0.04);
         dummy.updateMatrix();
-        rubble.setMatrixAt(ri, dummy.matrix);
+        rubble.setMatrixAt(spot.slot, dummy.matrix);
         const rubbleMat = cellMaterial?.(Math.floor(spot.gx / sub), Math.floor(spot.gz / sub)) ?? material;
         color.set(rubbleHex(spot.gx, spot.gz, rubbleMat));
-        rubble.setColorAt(ri, color);
+        rubble.setColorAt(spot.slot, color);
       });
-      rubble.instanceMatrix.needsUpdate = true;
-      if (rubble.instanceColor) rubble.instanceColor.needsUpdate = true;
+      dummy.rotation.set(0, 0, 0);
+      for (const rubble of rubbleRefs.current) {
+        if (!rubble) continue;
+        rubble.instanceMatrix.needsUpdate = true;
+        if (rubble.instanceColor) rubble.instanceColor.needsUpdate = true;
+      }
     }
     rubbleRest.current = rubbleCells;
   }, [rect.c0, rect.r0, rect.w, rect.d, material, wet, top, bottom, origin, sub, size, dummy, rubbleSpots, cellMaterial, cellWaterTone, cellBottom]);
@@ -230,10 +265,12 @@ function GroundBlocks({
       });
       mesh.instanceMatrix.needsUpdate = true;
     }
-    const rubble = rubbleRef.current;
-    if (rubble) {
-      rubbleRest.current.forEach((cell, i) => {
+    if (rubbleRest.current.length) {
+      for (const cell of rubbleRest.current) {
+        const rubble = rubbleRefs.current[cell.shape];
+        if (!rubble) continue;
         const t = t0 - cell.delay;
+        dummy.rotation.set(0, cell.ry, 0);
         if (t < 0) {
           remaining = true;
           dummy.position.set(cell.x, cell.y + DROP, cell.z);
@@ -248,9 +285,13 @@ function GroundBlocks({
           dummy.scale.set(cell.sx * pop, cell.sy * pop, cell.sz * pop);
         }
         dummy.updateMatrix();
-        rubble.setMatrixAt(i, dummy.matrix);
-      });
-      rubble.instanceMatrix.needsUpdate = true;
+        rubble.setMatrixAt(cell.slot, dummy.matrix);
+      }
+      dummy.rotation.set(0, 0, 0);
+      // Per-frame instance updates are the idiomatic R3F pattern; the
+      // immutability rule predates it (same as the camera rig).
+      // eslint-disable-next-line react-hooks/immutability
+      for (const rubble of rubbleRefs.current) if (rubble) rubble.instanceMatrix.needsUpdate = true;
     }
     if (!remaining) done.current = true;
   });
@@ -273,17 +314,22 @@ function GroundBlocks({
           opacity={wet ? 0.94 : 1}
         />
       </instancedMesh>
-      {rubbleSpots.length > 0 && (
-        <instancedMesh
-          ref={rubbleRef}
-          args={[undefined, undefined, rubbleSpots.length]}
-          castShadow
-          receiveShadow
-          frustumCulled={false}
-        >
-          <boxGeometry args={[0.4, 0.4, 0.4]} />
-          <meshStandardMaterial roughness={0.9} metalness={0.04} envMapIntensity={0.2} />
-        </instancedMesh>
+      {Array.from({ length: RUBBLE_SHAPES }, (_, shape) =>
+        rubbleCounts[shape] > 0 ? (
+          <instancedMesh
+            key={shape}
+            ref={(m) => {
+              rubbleRefs.current[shape] = m;
+            }}
+            args={[undefined, undefined, rubbleCounts[shape]]}
+            castShadow
+            receiveShadow
+            frustumCulled={false}
+          >
+            {shape === 0 ? <boxGeometry args={[0.4, 0.4, 0.4]} /> : shape === 1 ? <dodecahedronGeometry args={[0.22, 0]} /> : <boxGeometry args={[0.5, 0.12, 0.36]} />}
+            <meshStandardMaterial roughness={0.9} metalness={0.04} envMapIntensity={0.2} flatShading={shape === 1} />
+          </instancedMesh>
+        ) : null,
       )}
     </group>
   );
@@ -314,7 +360,78 @@ function Platform({
   return <GroundBlocks rect={rect} top={top} bottom={bottom} material={material} origin={origin} cellMaterial={cellMaterial} cellBottom={inset ? undefined : cellBottom} />;
 }
 
+/** Wall bricks: one ground block wide, half a block tall, a hand thick. */
+const WALL_BRICK_H = 0.5;
+const WALL_BRICK_T = 0.4;
+
+/**
+ * A wall laid in ground blocks — the same sub-lot bricks, the same seeded
+ * palette as the material it is built from, so a room reads as the
+ * foundation carried upward instead of a plaster sheet set on top of it.
+ */
+function WallBlocks({ wall, material }: { wall: WallSpec; material: PlatformMaterial }) {
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  const dummy = useMemo(() => new THREE.Object3D(), []);
+  const sub = GROUND_SUB;
+  const size = TILE / sub;
+  const rows = Math.max(1, Math.round(wall.height / WALL_BRICK_H));
+  const open = useMemo(() => new Set(wall.openings ?? []), [wall.openings]);
+  const solid = useMemo(() => {
+    const cells: number[] = [];
+    for (let i = 0; i < wall.len; i += 1) if (!open.has(i)) cells.push(i);
+    return cells;
+  }, [wall.len, open]);
+  const count = Math.max(1, solid.length * sub * rows);
+  const horizontal = wall.dir === "h";
+  const edgeOffset = wall.side === "n" || wall.side === "w" ? -0.5 : 0.5;
+  // The seed for tone variety: a wall's own footprint on the sub-lot grid,
+  // offset per row so courses do not repeat the ground beneath.
+  const salt = hash2(wall.c * 7 + wall.r * 13, wall.len + rows);
+
+  useLayoutEffect(() => {
+    const mesh = meshRef.current;
+    if (!mesh) return;
+    const color = new THREE.Color();
+    let i = 0;
+    for (const cell of solid) {
+      for (let s = 0; s < sub; s += 1) {
+        const alongIdx = cell * sub + s;
+        const along = (cell + (s + 0.5 - sub / 2) / sub) * TILE;
+        for (let r = 0; r < rows; r += 1) {
+          // Running bond: every other course shifts half a brick.
+          const bond = r % 2 ? size / 2 : 0;
+          const x = horizontal ? (wall.c + along / TILE) * TILE + bond : (wall.c + edgeOffset) * TILE;
+          const z = horizontal ? (wall.r + edgeOffset) * TILE : (wall.r + along / TILE) * TILE + bond;
+          const h = r === rows - 1 ? wall.height - r * WALL_BRICK_H : WALL_BRICK_H;
+          dummy.position.set(x, r * WALL_BRICK_H + h / 2, z);
+          dummy.scale.set(1, h / WALL_BRICK_H, 1);
+          dummy.updateMatrix();
+          mesh.setMatrixAt(i, dummy.matrix);
+          color.set(blockHex(alongIdx + salt, r * 31 + (horizontal ? wall.r : wall.c) * 3 + salt, material));
+          mesh.setColorAt(i, color);
+          i += 1;
+        }
+      }
+    }
+    mesh.count = i;
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }, [wall, material, solid, rows, sub, size, horizontal, edgeOffset, salt, dummy]);
+
+  return (
+    <instancedMesh ref={meshRef} args={[undefined, undefined, count]} castShadow receiveShadow frustumCulled={false}>
+      <boxGeometry args={horizontal ? [size * 0.98, WALL_BRICK_H * 0.96, WALL_BRICK_T] : [WALL_BRICK_T, WALL_BRICK_H * 0.96, size * 0.98]} />
+      <meshStandardMaterial roughness={0.86} metalness={0.02} envMapIntensity={0.25} />
+    </instancedMesh>
+  );
+}
+
 function Wall({ wall }: { wall: WallSpec }) {
+  if (wall.material) return <WallBlocks wall={wall} material={wall.material} />;
+  return <WallSlab wall={wall} />;
+}
+
+function WallSlab({ wall }: { wall: WallSpec }) {
   const body = useMat(wall.color ?? WALL_COLOR, { roughness: 0.82 });
   const cap = useMat(wall.cap ?? WALL_CAP, { roughness: 0.78 });
   const t = 0.16 * TILE;
