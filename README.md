@@ -4,7 +4,7 @@
 
 You describe a place (“a harbor full of fishing boats”). The page registers site tools. A WebMCP agent plans, composes, places, inspects, and repairs until the scene actually reads as what you asked for. You can paint pieces yourself; the agent builds around what you locked. Anyone with the link gets the same world.
 
-[Live demo](https://twominds.j8vpkjs9pw.workers.dev/) · [Source](https://github.com/Saivion/TwoMinds) · License: [MIT](./LICENSE)
+[Live demo](https://sharableworlds.com/) · [Source](https://github.com/Saivion/TwoMinds) · License: [MIT](./LICENSE)
 
 No login. Open the live URL in **ChatGPT’s in-app browser** or **Chrome with WebMCP enabled**. Footer should read **WebMCP on**.
 
@@ -96,7 +96,7 @@ Surprise Me and share-URL boot call these same executes when no host is attached
 
 ## Try it (judges)
 
-**Live:** [https://twominds.j8vpkjs9pw.workers.dev/](https://twominds.j8vpkjs9pw.workers.dev/)
+**Live:** [https://sharableworlds.com/](https://sharableworlds.com/)
 
 Hosted on Cloudflare Workers. No auth.
 
