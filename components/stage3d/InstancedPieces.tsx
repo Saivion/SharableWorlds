@@ -1,13 +1,14 @@
 "use client";
 
 import { useGLTF } from "@react-three/drei";
-import { useFrame, type ThreeEvent } from "@react-three/fiber";
-import { useLayoutEffect, useMemo, useRef } from "react";
+import { useFrame } from "@react-three/fiber";
+import { memo, useLayoutEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import type { CatalogItem } from "@/lib/catalog";
 import { modelScale } from "@/lib/composition/scale3d";
 import { DROP, SNAP, easeOut, legoPop, pieceWaveSnap } from "./legoDrop";
 import { ModelPiece, patchPieceMaterial } from "./ModelPiece";
+import { countRender, perfCounters, renderClock } from "./stageState";
 
 /**
  * Repeated catalog models rendered as instances — the "40 pines = 40 scene
@@ -16,6 +17,10 @@ import { ModelPiece, patchPieceMaterial } from "./ModelPiece";
  * per sub-mesh instead of one per piece (and the same again in the shadow
  * pass). The logical world doesn't change — lots, occupancy, selection, and
  * the WebMCP tools see identical pieces; only materialization differs.
+ *
+ * The stage hands each group a STABLE `entries` array (only groups whose
+ * members changed get a new one), and this component is memoized on it —
+ * so a placement rewrites exactly one group's instance buffer.
  *
  * Rigged models (SkinnedMesh anywhere in the GLB) can't instance — those
  * groups fall back to per-piece ModelPiece clones automatically.
@@ -86,15 +91,8 @@ function capacityFor(n: number) {
   return Math.max(16, Math.ceil(n / 16) * 16);
 }
 
-export function InstancedPieces({
-  item,
-  entries,
-  onPieceDown,
-}: {
-  item: CatalogItem;
-  entries: InstancedEntry[];
-  onPieceDown?: (pieceId: string, e: ThreeEvent<PointerEvent>) => void;
-}) {
+export const InstancedPieces = memo(function InstancedPieces({ item, entries }: { item: CatalogItem; entries: InstancedEntry[] }) {
+  countRender("instancedGroupRenders");
   const { parts, skinned, norm } = useModelParts(item);
   const meshRefs = useRef<(THREE.InstancedMesh | null)[]>([]);
   const arrivals = useRef(new Map<string, Arrival>());
@@ -110,6 +108,7 @@ export function InstancedPieces({
   });
 
   const capacity = capacityFor(entries.length);
+  const pieceIds = useMemo(() => entries.map((e) => e.id), [entries]);
 
   // Track arrivals: new pieces either ride the foundation wave (compose) or
   // grow in place (agent hop, human click) — same contract as PieceArrive.
@@ -135,6 +134,7 @@ export function InstancedPieces({
   const writeAll = (now: number) => {
     const s = scratch.current;
     let settled = true;
+    if (process.env.NODE_ENV !== "production") perfCounters.instancedWrites += 1;
     for (let i = 0; i < entries.length; i += 1) {
       const e = entries[i];
       const a = arrivals.current.get(e.id);
@@ -144,7 +144,10 @@ export function InstancedPieces({
       if (a && !a.done) {
         if (a.mode === "wave") {
           const t = (now - a.born) / 1000 - a.delay;
-          if (t < 0) {
+          // Whatever happened to the frame loop meanwhile (a hidden tab, a
+          // remount), a drop that is seconds overdue is simply landed.
+          if (t > SNAP + 3) a.done = true;
+          else if (t < 0) {
             visible = false;
           } else if (t >= SNAP) {
             a.done = true;
@@ -157,7 +160,7 @@ export function InstancedPieces({
           if (t >= GROW_S) {
             a.done = true;
           } else {
-            pop = 0.6 + 0.4 * easeOut(t / GROW_S);
+            pop = 0.86 + 0.14 * easeOut(t / GROW_S);
           }
         }
         if (!a.done) settled = false;
@@ -180,7 +183,10 @@ export function InstancedPieces({
       if (!mesh) continue;
       mesh.count = entries.length;
       mesh.instanceMatrix.needsUpdate = true;
+      // A fresh bounding sphere is what lets the group be frustum-culled as
+      // one object when the view leaves it entirely.
       mesh.computeBoundingSphere();
+      mesh.userData.pieceIds = pieceIds;
     }
     return settled;
   };
@@ -189,12 +195,15 @@ export function InstancedPieces({
   useLayoutEffect(() => {
     if (skinned || parts.length === 0) return;
     allSettled.current = writeAll(performance.now());
+    // New instances cast new shadows; unsettled ones need frames.
+    renderClock.animating();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entries, parts, norm, capacity, skinned]);
 
   useFrame(() => {
     if (skinned || parts.length === 0 || allSettled.current) return;
     allSettled.current = writeAll(performance.now());
+    if (!allSettled.current) renderClock.animating();
   });
 
   // Free per-mesh instance buffers on unmount; the geometry/material stay in
@@ -213,13 +222,7 @@ export function InstancedPieces({
     return (
       <>
         {entries.map((e) => (
-          <ModelPiece
-            key={e.id}
-            item={item}
-            position={[e.x, e.y, e.z]}
-            rot={e.rot}
-            onPointerDown={(ev) => onPieceDown?.(e.id, ev as ThreeEvent<PointerEvent>)}
-          />
+          <ModelPiece key={e.id} pieceId={e.id} item={item} position={[e.x, e.y, e.z]} rot={e.rot} />
         ))}
       </>
     );
@@ -237,15 +240,9 @@ export function InstancedPieces({
           args={[part.geometry, part.material as THREE.Material, capacity]}
           castShadow
           receiveShadow
-          frustumCulled={false}
           dispose={null}
-          onPointerDown={(e) => {
-            if (e.instanceId == null) return;
-            const entry = entries[e.instanceId];
-            if (entry) onPieceDown?.(entry.id, e);
-          }}
         />
       ))}
     </>
   );
-}
+});

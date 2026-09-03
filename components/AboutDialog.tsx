@@ -153,7 +153,7 @@ export function AboutDialog({ open, closing, onClose }: Props) {
           <button type="button" className="gloss-btn about-start" onClick={onClose}>
             <span className="gloss-btn__spark" aria-hidden>
               ✦
-            </span>{" "}
+            </span>
             Got it
           </button>
         </div>

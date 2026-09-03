@@ -77,7 +77,7 @@ export function AgentBuild() {
 
   if (!visible) return null;
 
-  const headline = busy ? "Agent Building" : complete ? "Scene Complete" : validation ? `${validation.completion}% Complete` : "Agent Built";
+  const headline = busy ? "Agent Building" : "Scene Complete";
 
   return (
     <div className="agent-build-anchor">

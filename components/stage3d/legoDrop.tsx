@@ -5,6 +5,7 @@ import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import * as THREE from "three";
 import type { LotRect } from "@/lib/composition/grid3d";
 import { GROUND_SUB } from "./terrainLook";
+import { renderClock } from "./stageState";
 
 /**
  * One clock for the Lego drop. Foundation bricks and the pieces that stand
@@ -46,12 +47,34 @@ type Wave = { born: number; origin: number };
 
 let wave: Wave | null = null;
 
+let restarts = 0;
+
 export function startFoundationWave(origin: number) {
   wave = { born: performance.now(), origin };
+  restarts += 1;
+  if (process.env.NODE_ENV !== "production" && typeof window !== "undefined") {
+    (window as unknown as { __wave?: () => { born: number; origin: number; restarts: number } | null }).__wave = () => (wave ? { ...wave, restarts } : null);
+  }
 }
 
 export function currentWave(): Wave | null {
   return wave;
+}
+
+/** A wave older than this has landed; bricks mounting after it (ground
+ * grown onto a standing scene) drop on their own short clock. */
+const WAVE_FRESH_MS = 3000;
+
+/**
+ * The clock a strip of bricks should drop on: the shared foundation wave
+ * while it is still sweeping, else a fresh one starting now from the strip's
+ * own corner — so new ground lands in a beat instead of waiting out a wave
+ * measured from the far side of the island, or popping in with no drop.
+ */
+export function waveFor(rect: { c0: number; r0: number }): Wave {
+  const now = performance.now();
+  if (wave && now - wave.born < WAVE_FRESH_MS) return wave;
+  return { born: now, origin: (rect.c0 + rect.r0) * GROUND_SUB };
 }
 
 export type PieceSnap = { delay: number; bornAt: number };
@@ -86,25 +109,31 @@ export function SnapDown({
       g.position.y = DROP;
       g.scale.setScalar(0);
     }
+    // The renderer draws on demand: a drop must ask for its frames.
+    renderClock.animating();
   }, [delay, bornAt]);
   useFrame(() => {
     const g = ref.current;
     if (!g || done.current || born.current === 0) return;
     const t = (performance.now() - born.current) / 1000 - delay;
-    if (t < 0) {
+    if (t < 0 && t > -60) {
       g.position.y = DROP;
       g.scale.setScalar(0);
+      renderClock.animating();
       return;
     }
-    if (t >= SNAP) {
+    // A clock that is minutes off (a stale wave captured at mount) lands now.
+    if (t >= SNAP || t <= -60) {
       g.position.y = 0;
       g.scale.setScalar(1);
       done.current = true;
+      renderClock.markSceneDirty();
       return;
     }
     const e = easeOut(t / SNAP);
     g.position.y = DROP * (1 - e);
     g.scale.setScalar(legoPop(t));
+    renderClock.animating();
   });
   return (
     <group ref={ref} position={[0, DROP, 0]} scale={0}>

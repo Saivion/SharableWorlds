@@ -3,12 +3,21 @@
 import { MousePointer2 } from "lucide-react";
 import { AGENT_ACCENT, useTown } from "@/lib/store";
 
-/** Same MousePointer2 as the Select rail, in agent blue. Hidden when idle. */
+/**
+ * Agent pointer. Renders inside `.agent-cursor-layer` (a fixed full-viewport
+ * overlay that is the last child of the studio) so it always paints above the
+ * kit palette and tool rails — including on the first spawn frame.
+ */
 export function AgentCursor() {
   const cursor = useTown((s) => s.agentCursor);
   if (!cursor?.visible) return null;
+
   return (
-    <div className="agent-cursor" style={{ left: cursor.x, top: cursor.y }} aria-hidden>
+    <div
+      className="agent-cursor"
+      style={{ transform: `translate3d(${cursor.x - 2}px, ${cursor.y - 1}px, 0)` }}
+      aria-hidden
+    >
       <span className="agent-cursor__ptr">
         <MousePointer2
           size={22}

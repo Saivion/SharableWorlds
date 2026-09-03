@@ -41,13 +41,17 @@ export function autoGroundPads(pieces: Record<string, Piece>, env: EnvironmentSp
     }
     groups.push(group);
   }
-  return groups.map((group) => {
-    const c0 = Math.floor(Math.min(...group.map((p) => p.col))) - 1;
-    const r0 = Math.floor(Math.min(...group.map((p) => p.row))) - 1;
-    const c1 = Math.ceil(Math.max(...group.map((p) => p.col))) + 1;
-    const r1 = Math.ceil(Math.max(...group.map((p) => p.row))) + 1;
-    return { c0, r0, w: c1 - c0 + 1, d: r1 - r0 + 1 };
-  });
+  // Sorted so a new piece never reorders the pads that already stand — the
+  // stage keys pads by rect and would otherwise re-drop every one of them.
+  return groups
+    .map((group) => {
+      const c0 = Math.floor(Math.min(...group.map((p) => p.col))) - 1;
+      const r0 = Math.floor(Math.min(...group.map((p) => p.row))) - 1;
+      const c1 = Math.ceil(Math.max(...group.map((p) => p.col))) + 1;
+      const r1 = Math.ceil(Math.max(...group.map((p) => p.row))) + 1;
+      return { c0, r0, w: c1 - c0 + 1, d: r1 - r0 + 1 };
+    })
+    .sort((a, b) => a.r0 - b.r0 || a.c0 - b.c0 || a.w - b.w || a.d - b.d);
 }
 
 function within(rect: LotRect, col: number, row: number) {

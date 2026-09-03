@@ -3,7 +3,7 @@
 import { CATALOG, catalogItem, defaultForKind, FEATURED, type CatalogItem } from "./catalog";
 import { ARCHETYPES } from "./composition/archetypes";
 import type { ComposedPlan, SceneTodo } from "./composition/compose";
-import { understandIntent } from "./composition/intent";
+import { understandIntent, type SceneIntent } from "./composition/intent";
 import { facingVector } from "./composition/layout";
 import {
   addZone,
@@ -14,9 +14,12 @@ import {
   type ZoneLocation,
   type ZoneSize,
 } from "./composition/ops";
+import { autoGroundPads } from "./composition/autoEnv";
 import { waterNeed } from "./composition/density";
+import { planRelief, reliefIntensity } from "./composition/relief";
+import { pickItems } from "./composition/pick";
 import { programTexture, programZone } from "./composition/program";
-import { coverageOf, COVERAGE_TARGET, buildRuleContext } from "./composition/rules";
+import { coverageOf, COVERAGE_TARGET, buildRuleContext, elementPool } from "./composition/rules";
 import { bodiesCollide, clearanceLots } from "./composition/scale3d";
 import {
   GENERATOR_VERSION,
@@ -25,23 +28,17 @@ import {
   fingerprint,
   generateSceneSeed,
   isValidSeed,
+  MAX_ADDITIONS,
   normalizeSeed,
   shareUrl,
 } from "./composition/seed";
 import { pathLots, platformAt, reservedLots, surfaceAt, zoneAt } from "./composition/surface";
-import { rectContains } from "./composition/grid3d";
-import { cellKey } from "./composition/island";
+import { rectContains, type LotRect } from "./composition/grid3d";
+import { cellKey, generateIslandMask, largestRectInMask, maskToRects } from "./composition/island";
 import { SCENE_RULES } from "./composition/rules";
-import {
-  boundaryPool,
-  buildFrameSkip,
-  landMaskFromEnv,
-  paintTerrain,
-  planBoundary,
-  withWaterPaint,
-} from "./composition/terrain";
-import { THEMES, resolveTheme, themeById } from "./composition/themes";
-import { GROUND_MATERIALS, type GroundCell, type PlatformMaterial, type ZoneType } from "./composition/types";
+import { boundaryPool, buildFrameSkip, landMaskFromEnv, paintTerrain, planBoundary, waterMaskFromEnv, withWaterPaint } from "./composition/terrain";
+import { THEMES, type ThemeSpec, resolveTheme, themeById } from "./composition/themes";
+import { emptyEnvironment, GROUND_MATERIALS, type GroundCell, type PlatformMaterial, type ZoneSpec, type ZoneType, type EnvironmentSpec } from "./composition/types";
 import { validateScene, type ValidationReport } from "./composition/validate";
 import { snapLotCoord } from "./iso";
 import { clampLabel, useTown, type BuildPhase, type TraceCaller } from "./store";
@@ -211,12 +208,19 @@ export function lotCollision(lot: string, item: CatalogItem, ignoreId?: string):
   return null;
 }
 
-function lotOnScene(lot: string): boolean {
+/** Vessels are the only things that stand on water — the same line the
+ * grounded law draws, so nothing the engine accepts fails validation. */
+function floats(item?: CatalogItem | null): boolean {
+  return item?.kind === "boat" || item?.kind === "pirate";
+}
+
+function lotOnScene(lot: string, item?: CatalogItem | null): boolean {
   const env = useTown.getState().environment;
   if (!env) return true;
   const at = parseLot(lot);
   if (!at) return false;
   if (platformAt(env, at.col, at.row)) return true;
+  if (item && !floats(item)) return false;
   return env.water.some((w) => rectContains(w.rect, at.col, at.row));
 }
 
@@ -244,7 +248,7 @@ function searchClearLot(
         const lot = lotId(col, row);
         if (occ.has(lot) && occ.get(lot)?.id !== ignoreId) continue;
         if (reserved.has(lot)) continue;
-        if (!lotOnScene(lot)) continue;
+        if (!lotOnScene(lot, item)) continue;
         if (bulky && walkways.has(lot)) continue;
         if (lotCollision(lot, item, ignoreId)) continue;
         if (accept && !accept(lot, col, row)) continue;
@@ -531,7 +535,7 @@ export function placePiece(spec: PlaceSpec, owner: Owner): PlaceOutcome {
     let gap = Math.min(4, Math.max(0.5, Math.round(Number(spec.gap ?? 1) * 2) / 2 || 1));
     lot = stepLot(anchor.lot, side, gap);
     requested = lot ?? undefined;
-    while (lot && (occ.has(lot) || reserved.has(lot) || lotCollision(lot, spec.item) || !lotOnScene(lot))) {
+    while (lot && (occ.has(lot) || reserved.has(lot) || lotCollision(lot, spec.item) || !lotOnScene(lot, spec.item))) {
       gap += 1;
       if (gap > 4) {
         const at = parseLot(anchor.lot);
@@ -680,6 +684,14 @@ export function humanMove(id: string, lot: string): PlaceOutcome {
   const holder = occupancyMap().get(target);
   if (holder && holder.id !== piece.id) {
     return { ok: false, why: `Lot ${target} is occupied by ${holder.id}.` };
+  }
+  {
+    // A drag never lands off the foundation: the architecture, water for a
+    // vessel, nothing else — the same line every other write path draws.
+    const item = catalogItem(piece.catalogId);
+    if (store.environment && !lotOnScene(target, item)) {
+      return { ok: false, why: `Lot ${target} is off the scene${floats(item) ? "" : " (only vessels stand on water)"}.`, empty_nearby: nearestEmpties(target, occupancyMap(), 4, item ?? undefined) };
+    }
   }
   if (reservedLots(store.environment).has(target)) {
     return { ok: false, why: `Lot ${target} holds the stairs.` };
@@ -989,6 +1001,20 @@ type ApplyReport = {
 };
 
 /** Place a list of todos through the single write path, paced. */
+/**
+ * Where a todo will actually land, by the engine's own rules — the requested
+ * lot when it is clear, else the nearest clear lot within two cells that no
+ * later todo still needs. Null means there is no room: the piece is skipped
+ * up front, so the cursor never walks to a spot off the foundation and the
+ * ghost never shows a piece where none can stand.
+ */
+function previewLanding(item: CatalogItem, lot: string, avoid: Set<string>): string | null {
+  const parsed = parseLot(lot);
+  if (!parsed) return null;
+  const occ = occupancyMap();
+  return searchClearLot(parsed, item, occ, undefined, 0) ?? searchClearLot(parsed, item, occ, undefined, 2, (l) => !avoid.has(l));
+}
+
 async function applyTodos(todos: SceneTodo[], label: string): Promise<ApplyReport> {
   const report: ApplyReport = { placed: 0, skipped: [], placements: [] };
   const total = todos.length;
@@ -1003,12 +1029,19 @@ async function applyTodos(todos: SceneTodo[], label: string): Promise<ApplyRepor
       report.skipped.push({ place: todo.place, lot: todo.lot, why: "unknown catalog id" });
       continue;
     }
-    const step: PlacementStep = { catalogId: todo.place, lot: todo.lot, reason: todo.reason, index: i, total };
+    const target = previewLanding(item, todo.lot, pending);
+    const step: PlacementStep = { catalogId: todo.place, lot: target ?? todo.lot, reason: todo.reason, index: i, total };
+    if (!target) {
+      const why = `Lot ${todo.lot} has no room on the foundation within 2 cells.`;
+      report.skipped.push({ place: todo.place, lot: todo.lot, why: why.slice(0, 70) });
+      if (outcomeHook) await outcomeHook(step, { ok: false, why });
+      continue;
+    }
     if (pacer) await pacer(step);
-    else if (visible) useTown.getState().setAgentGhost({ lot: todo.lot, catalogId: todo.place });
+    else if (visible) useTown.getState().setAgentGhost({ lot: target, catalogId: todo.place });
     const outcome = agentPlaceOne({
       item,
-      lot: todo.lot,
+      lot: target,
       flip: todo.flip,
       ...(todo.rot ? { rot: todo.rot } : {}),
       reason: todo.reason,
@@ -1016,7 +1049,7 @@ async function applyTodos(todos: SceneTodo[], label: string): Promise<ApplyRepor
     });
     if (outcome.ok) {
       report.placed += 1;
-      const record = describePiece(outcome.piece, outcome.requested);
+      const record = describePiece(outcome.piece, todo.lot);
       if (report.placements.length < 16) report.placements.push(record);
       if (outcomeHook) await outcomeHook(step, { ok: true, lot: outcome.piece.lot, drift: record.drift ?? 0 });
     } else {
@@ -1234,11 +1267,125 @@ function planTodosFor(plan: ComposedPlan, zones: string[] | null, only: string[]
   });
 }
 
+/** Land a scene wants before it reads as a world, in lots. */
+const WORLD_LAND = 120;
+
+/**
+ * Grow a small footprint into a world-sized one: an organic island seeded
+ * around the standing land and unioned with it, painted and — when the
+ * scene has no hills yet — given relief on the new ground only. Everything
+ * that stands keeps its cells; water and piers are left alone. Returns the
+ * number of lots added.
+ */
+function growFooting(env: EnvironmentSpec, theme: ThemeSpec, seed: string, prompt: string, want = WORLD_LAND): { env: EnvironmentSpec; added: number } {
+  const land = landMaskFromEnv(env);
+  if (!land.cells.size || land.cells.size >= want) return { env, added: 0 };
+  const water = waterMaskFromEnv(env);
+  const centre = { col: land.bbox.c0 + Math.floor(land.bbox.w / 2), row: land.bbox.r0 + Math.floor(land.bbox.d / 2) };
+  // Radii that reach the target from the standing footprint outward.
+  const rx = Math.max(6.5, land.bbox.w / 2 + 2.5);
+  const rz = Math.max(5.5, land.bbox.d / 2 + 2);
+  const blob = generateIslandMask(createSeededRandom(deriveSeed(seed, "grow")), centre, rx, rz);
+  const fresh = new Set<string>();
+  for (const k of blob.cells) {
+    if (land.cells.has(k) || water.has(k)) continue;
+    const [col, row] = k.split(":").map(Number);
+    if (env.platforms.some((p) => rectContains(p.rect, col, row))) continue;
+    fresh.add(k);
+  }
+  if (!fresh.size) return { env, added: 0 };
+  const deck = env.platforms.find((p) => p.level === 0 && !p.inset && p.material !== "road" && p.id !== "pier")?.material ?? "grass";
+  const next: EnvironmentSpec = { ...env, platforms: [...env.platforms], ground: [...(env.ground ?? [])] };
+  const bbox = (cells: Set<string>): LotRect => {
+    let c0 = Infinity, r0 = Infinity, c1 = -Infinity, r1 = -Infinity;
+    for (const k of cells) {
+      const [c, r] = k.split(":").map(Number);
+      c0 = Math.min(c0, c); r0 = Math.min(r0, r); c1 = Math.max(c1, c); r1 = Math.max(r1, r);
+    }
+    return { c0, r0, w: c1 - c0 + 1, d: r1 - r0 + 1 };
+  };
+  const start = next.platforms.filter((p) => p.id.startsWith("grow-")).length;
+  maskToRects({ cells: fresh, bbox: bbox(fresh) }).forEach((rect, i) => next.platforms.push({ id: `grow-${start + i}`, rect, level: 0, material: deck }));
+  // Themed patches on the new ground only; what was painted stays painted.
+  const whole = { cells: new Set([...land.cells, ...fresh]), bbox: bbox(new Set([...land.cells, ...fresh])) };
+  const painted = new Set((next.ground ?? []).map((g) => cellKey(g.col, g.row)));
+  for (const g of paintTerrain(whole, theme, `${seed}-grow`)) {
+    const k = cellKey(g.col, g.row);
+    if (fresh.has(k) && !painted.has(k)) next.ground!.push(g);
+  }
+  // Relief on the new land when the scene has none: the standing ground,
+  // its walks and stairs stay flat.
+  if (!next.platforms.some((p) => p.id.startsWith("hill-"))) {
+    const avoid = new Set(land.cells);
+    for (const path of next.paths) for (const c of path.cells) avoid.add(cellKey(c.col, c.row));
+    for (const st of next.stairs) for (let dr = -1; dr <= 1; dr += 1) for (let dc = -1; dc <= 1; dc += 1) avoid.add(cellKey(st.at.col + dc, st.at.row + dr));
+    const relief = planRelief(whole, next, theme, createSeededRandom(deriveSeed(seed, "grow:relief")), reliefIntensity(prompt, undefined, createSeededRandom(deriveSeed(seed, "grow:roll"))), avoid);
+    next.platforms.push(...relief.platforms);
+  }
+  return { env: next, added: fresh.size };
+}
+
+/** The intents the scene was grown with after its base build (extend_scene). */
+function additionIntents(): SceneIntent[] {
+  const meta = useTown.getState().sceneMeta;
+  const base = meta?.prompt.trim().toLowerCase();
+  const seen = new Set<string>();
+  return (meta?.additions ?? [])
+    .filter((a) => {
+      const k = a.trim().toLowerCase();
+      if (k === base || seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    })
+    .map((a) => understandIntent(a));
+}
+
+/** The intent that knows a zone: the base's archetype when it has that role
+ * or type, else the addition that brought the zone. */
+function intentForZone(zone: ZoneSpec, base: SceneIntent): SceneIntent {
+  const knows = (i: SceneIntent) => Boolean(i.archetype?.zones.some((r) => r.role === zone.id || r.type === zone.type));
+  if (knows(base)) return base;
+  return additionIntents().find(knows) ?? base;
+}
+
+/** Roles of an addition's elements that belong in `zone` and have no piece
+ * yet — what to place when the zone already existed. */
+function rolesMissingFor(intent: SceneIntent, zone: ZoneSpec, seed: string, roleId?: string): string[] {
+  // The pool the coverage law will judge by — same seed, same picks.
+  const judgeSeed = useTown.getState().sceneMeta?.seed ?? seed;
+  const archetype = intent.archetype;
+  if (!archetype) return [];
+  const role = (roleId ? archetype.zones.find((r) => r.role === roleId) : undefined) ?? archetype.zones.find((r) => r.role === zone.id) ?? archetype.zones.find((r) => r.type === zone.type);
+  if (!role) return [];
+  // Only pieces standing in (or just beside) the zone count — the same
+  // fence the coverage law draws when it judges the zone by name.
+  const near = { c0: zone.rect.c0 - 1, r0: zone.rect.r0 - 1, w: zone.rect.w + 2, d: zone.rect.d + 2 };
+  const standing = new Set(
+    piecesList()
+      .filter((p) => {
+        const at = parseLot(p.lot);
+        return at ? rectContains(near, at.col, at.row) : false;
+      })
+      .map((p) => p.catalogId),
+  );
+  return archetype.elements
+    .filter((el) => el.zone === role.role)
+    .filter((el) => ![...elementPool(el, judgeSeed)].some((id) => standing.has(id)))
+    .map((el) => el.role);
+}
+
+/** Repairs already tried on a scene, with the completion they were tried at
+ * — repair_scene will not replay one until the score has moved. */
+const triedRepairs = new Map<string, number>();
+
 function runValidation(theme?: string): ValidationReport {
   const state = useTown.getState();
-  const prompt = (theme && theme.trim()) || state.sceneMeta?.prompt || state.nudgeGoal || undefined;
+  const base = state.sceneMeta?.prompt || state.nudgeGoal || undefined;
+  const prompt = (theme && theme.trim()) || base;
   const plan = state.scenePlan && (!prompt || state.scenePlan.intent.prompt === prompt.trim()) ? state.scenePlan : null;
-  const report = validateScene(state.environment, state.pieces, prompt, plan, state.sceneMeta?.seed);
+  // Judged as a whole, the scene must also hold everything it was grown with.
+  const extras = !theme?.trim() || theme.trim() === base ? additionIntents() : [];
+  const report = validateScene(state.environment, state.pieces, prompt, plan, state.sceneMeta?.seed, extras);
   state.setValidation(report);
   if (report.complete) state.setPhase("complete");
   return report;
@@ -1274,7 +1421,7 @@ const WRITE_RULES =
   "Lots are A1-style ids (M13 is the home center); there are no x,y. Never target human_locks. Every write returns the placement record (lot, requested_lot, drift, zone, level, surface, facing) — read it. Pass intent (a short phrase) so the canvas can narrate.";
 
 const LIFECYCLE =
-  "THE LIFECYCLE for a scene request: plan_scene (understand + plan, no mutation) → compose_scene (architecture: footprint, zones, walls, stairs, water, paths, terrain) → populate_zones (the story objects, zone by zone) → create_environment (the framing boundary) → get_scene / inspect_region (look) → validate_scene (the completeness score) → repair_scene or targeted repairs → validate_scene again until complete. build_scene runs that whole loop in one call when you cannot steer. A SMALL request ('add a tree beside the house') is ONE targeted call (place_piece / create_vegetation / move_piece), never a rebuild.";
+  "THE LIFECYCLE for a scene request: plan_scene (understand + plan, no mutation) → compose_scene (architecture: footprint, zones, walls, stairs, water, paths, terrain) → populate_zones (the story objects, zone by zone) → create_environment (the framing boundary) → get_scene / inspect_region (look) → validate_scene (the completeness score) → repair_scene or targeted repairs → validate_scene again until complete. build_scene runs that whole loop in one call when you cannot steer. To GROW a scene that already stands from a new prompt ('add a fishing harbor with boats', 'build on this with a market and more people') call extend_scene — it is ADDITIVE: it annexes the zones the prompt needs, fills them, frames them, and validates the whole; nothing standing is removed. Never compose_scene or build_scene for that — they replace the architecture. A SMALL request ('add a tree beside the house') is ONE targeted call (place_piece / create_vegetation / move_piece), never a rebuild.";
 
 export const TOWN_TOOLS: ModelContextTool[] = [
   {
@@ -1590,7 +1737,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
   {
     name: "compose_scene",
     description:
-      "COMPOSE (mutation, architecture only) — stage a plan's composition onto the canvas: the footprint, themed ground, zones with their walls/stairs/water/road/rise, and the paths between them. NO props are placed. Pass plan_id from plan_scene (or theme/type/seed to plan and compose in one step). The agent's previous build is swept; human pieces are preserved. Returns the zones and circulation and what to call next: populate_zones, then create_environment, then validate_scene. For a small change to an existing scene do NOT call this (it replaces the architecture); use create_zone / create_path / place_piece instead.",
+      "COMPOSE (mutation, architecture only) — stage a plan's composition onto the canvas: the footprint, themed ground, zones with their walls/stairs/water/road/rise, and the paths between them. NO props are placed. Pass plan_id from plan_scene (or theme/type/seed to plan and compose in one step). The agent's previous build is swept; human pieces are preserved. Returns the zones and circulation and what to call next: populate_zones, then create_environment, then validate_scene. For a small change to an existing scene do NOT call this (it replaces the architecture); use create_zone / create_path / place_piece instead, and extend_scene to grow a standing scene from a new prompt.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1672,10 +1819,11 @@ export const TOWN_TOOLS: ModelContextTool[] = [
       const knownToPlan = new Set(plan?.env.zones.map((z) => z.id) ?? []);
       const targets = (zoneIds ?? env.zones.map((z) => z.id)).filter((z) => !knownToPlan.has(z) || only);
       const liveTodos: SceneTodo[] = [];
-      const intent = plan?.intent ?? understandIntent(state.sceneMeta?.prompt ?? state.nudgeGoal ?? "");
+      const baseIntent = plan?.intent ?? understandIntent(state.sceneMeta?.prompt ?? state.nudgeGoal ?? "");
       const seed = state.sceneMeta?.seed ?? plan?.seed ?? "UNSEEDED";
       for (const zoneId of targets) {
         const zone = env.zones.find((z) => z.id === zoneId)!;
+        const intent = intentForZone(zone, baseIntent);
         const already = piecesList().filter((p) => {
           const at = parseLot(p.lot);
           return Boolean(at && rectContains(zone.rect, at.col, at.row));
@@ -1799,7 +1947,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
   {
     name: "build_scene",
     description:
-      "ORCHESTRATOR — the complete lifecycle in ONE call, for hosts that cannot steer step by step: plan_scene → compose_scene → populate_zones → create_environment → get_scene → validate_scene → repair_scene → validate_scene, all dispatched through the same WebMCP tools (they appear nested in the trace). Pass theme (and optional seed to reproduce a world). Prefer the staged calls when you want to read the plan or steer the composition; never use this for a small addition.",
+      "ORCHESTRATOR — the complete lifecycle in ONE call, for hosts that cannot steer step by step: plan_scene → compose_scene → populate_zones → create_environment → get_scene → validate_scene → repair_scene → validate_scene, all dispatched through the same WebMCP tools (they appear nested in the trace). Pass theme (and optional seed to reproduce a world). Prefer the staged calls when you want to read the plan or steer the composition; never use this for a small addition, and never to add to a scene that already stands — that is extend_scene.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1831,6 +1979,234 @@ export const TOWN_TOOLS: ModelContextTool[] = [
         share_url: sceneShareUrl(),
         story: (plan.intent as { story?: string } | undefined)?.story,
         placed: Number(populated.placed ?? 0) + Number(framed.placed ?? 0),
+        ...(repaired ? { repairs_applied: repaired.applied } : {}),
+        validation: { complete: report.complete, completion: report.completion, verdict: report.verdict, score: report.score },
+      });
+    },
+  },
+
+  {
+    name: "extend_scene",
+    description:
+      "GROW (mutation, ADDITIVE) — build ON the scene that already stands from a new prompt, never replacing it: understands the prompt, reuses zones of the types it needs and annexes the rest beside the footprint (a harbor digs water and builds a pier, a market lays a square, a house raises a walled room), fills them with the prompt's story objects and people through the archetype grammar, frames the new ground, then validates the WHOLE scene (the base plus every addition) and repairs. Human pieces and the existing build stay exactly where they are. Pass prompt ('a fishing harbor with boats at anchor', 'a market with stalls and more people', 'a garden with benches'). Requires a scene — build_scene first on an empty board. The share link replays every addition in order, so the grown world is reproducible.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        prompt: { type: "string", description: "What to add to the current scene." },
+        max_repairs: { type: "number", description: "Repair budget after validation (default 6; 0 skips repair)." },
+        validate: { type: "boolean", description: "Validate and repair inside this call (default true). A steering host may pass false and run validate_scene / repair_scene itself." },
+      },
+      required: ["prompt"],
+    },
+    execute: async (input) => {
+      const prompt = (typeof input.prompt === "string" ? input.prompt : "").replace(/\s+/g, " ").trim().slice(0, 160);
+      if (!prompt) return fail("Pass prompt — what to add to the scene.");
+      // When the prompt is the board's first scene, it IS the base prompt —
+      // not an addition on top of one.
+      let bootstrapped = false;
+      {
+        // A board with only hand-placed pieces has no architecture yet: give
+        // those pieces ground (the same pads the stage draws under them) and
+        // a scene identity, then grow from there — nothing is swept.
+        const s0 = useTown.getState();
+        const standing = Object.keys(s0.pieces).length;
+        bootstrapped = !s0.sceneMeta;
+        if (!s0.environment && !standing) return fail("Nothing stands yet to build on. build_scene first (or place a piece), then extend_scene.", { next: ["build_scene {theme}"] });
+        if (!s0.environment) {
+          // A seeded island around the pieces' centre, big enough to hold a
+          // scene, plus the pads under any piece the island's edge misses.
+          const seed = generateSceneSeed(prompt);
+          const spots = Object.values(s0.pieces).flatMap((p) => {
+            const at = parseLot(p.lot);
+            return at ? [at] : [];
+          });
+          const centre = spots.length
+            ? { col: Math.round(spots.reduce((n, a) => n + a.col, 0) / spots.length), row: Math.round(spots.reduce((n, a) => n + a.row, 0) / spots.length) }
+            : { col: 12, row: 12 };
+          const island = generateIslandMask(createSeededRandom(deriveSeed(seed, "footing")), centre, 6.5, 5.5);
+          for (const rect of autoGroundPads(s0.pieces, null)) {
+            for (let r = rect.r0; r < rect.r0 + rect.d; r += 1) for (let c = rect.c0; c < rect.c0 + rect.w; c += 1) island.cells.add(cellKey(c, r));
+          }
+          const env = emptyEnvironment();
+          env.themeId = resolveTheme(prompt, "grass").id;
+          maskToRects(island).forEach((rect, i) => env.platforms.push({ id: `main-${i}`, rect, level: 0, material: "grass" }));
+          const core = largestRectInMask(island);
+          env.zones.push({ id: "plaza", type: "plaza", label: "the green", rect: core, level: 0, focal: { col: core.c0 + Math.floor(core.w / 2), row: core.r0 + Math.floor(core.d / 2) } });
+          s0.setEnvironment(withWaterPaint(env, seed));
+          rememberScene(seed, prompt);
+        }
+        if (!useTown.getState().sceneMeta) rememberScene(generateSceneSeed(prompt), prompt);
+      }
+      const state = useTown.getState();
+      const meta = state.sceneMeta!;
+      if ((meta.additions?.length ?? 0) >= MAX_ADDITIONS) return fail(`This world already carries ${MAX_ADDITIONS} additions — the most a share link replays. Remix into a new seed to keep growing.`);
+      const index = (meta.additions?.length ?? 0) + 1;
+      const seed = `${meta.seed}-add${index}`;
+      const intent = understandIntent(prompt);
+      beginWrite(`building on: ${prompt}`, null);
+
+      // 1. Ground. A small footprint grows into a world first — an organic
+      //    island around what stands, painted, with relief — so the addition
+      //    has real room. Then zones: reuse one of the same type, annex the
+      //    rest (at most three per addition).
+      let env = state.environment!;
+      const theme = themeById(env.themeId) ?? resolveTheme(prompt, "grass");
+      const grown = growFooting(env, theme, seed, prompt);
+      env = grown.env;
+      // Every archetype role gets a zone of its own: an existing zone of the
+      // type is reused once (two garden roles never share one bed), the rest
+      // are annexed.
+      const targets: { id: string; added: boolean; role: string; inside?: boolean }[] = [];
+      const added: string[] = [];
+      if (intent.archetype) {
+        const claimed = new Set<string>();
+        // Where something already stands — plus the ring a bulky piece keeps
+        // clear — a new zone does not go.
+        const blocked = new Set(
+          piecesList().flatMap((p) => {
+            const at = parseLot(p.lot);
+            if (!at) return [];
+            const item = catalogItem(p.catalogId);
+            const reach = item && clearanceLots(item) >= 0.6 ? 1 : 0;
+            const cells: string[] = [];
+            for (let dr = -reach; dr <= reach; dr += 1) for (let dc = -reach; dc <= reach; dc += 1) cells.push(cellKey(at.col + dc, at.row + dr));
+            return cells;
+          }),
+        );
+        for (const role of intent.archetype.zones) {
+          const existing = env.zones.find((z) => z.type === role.type && !claimed.has(z.id));
+          if (existing) {
+            claimed.add(existing.id);
+            targets.push({ id: existing.id, added: false, role: role.role });
+            continue;
+          }
+          if (added.length >= 5) continue;
+          const result = addZone(env, role.type, { location: role.location as ZoneLocation, size: role.size as ZoneSize, label: role.label, sceneSeed: seed, id: role.role, blocked });
+          env = result.env;
+          claimed.add(result.zone.id);
+          targets.push({ id: result.zone.id, added: true, role: role.role, inside: /placed on the main platform/.test(result.note) });
+          added.push(`${result.zone.id} (${result.zone.type}) — ${result.note}`);
+        }
+      }
+      {
+        if (added.length || grown.added) {
+          // A walk threaded to a new zone never runs through what already
+          // stands — a half pipe is not a walkway, and what the human placed
+          // is theirs, not the agent's to clear.
+          const standingLots = new Set(piecesList().map((p) => p.lot.trim().toUpperCase()));
+          env.paths = env.paths.map((path) => ({ ...path, cells: path.cells.filter((c) => !standingLots.has(lotId(c.col, c.row))) }));
+          useTown.getState().setEnvironment(withWaterPaint(env, meta.seed));
+          useTown.getState().bumpFocus();
+          await afterRender();
+        }
+      }
+      env = useTown.getState().environment!;
+
+      // 2. Story objects and people, through the same archetype program the
+      //    composers use, against the board as it stands (human pieces and
+      //    the earlier build are bodies to keep clear of).
+      const todos: SceneTodo[] = [];
+      const bodiesNow = () => [
+        ...piecesList().flatMap((p) => {
+          const at = parseLot(p.lot);
+          const item = catalogItem(p.catalogId);
+          return at ? [{ col: at.col, row: at.row, r: item ? clearanceLots(item) : 0.6, kind: item?.kind, catalogId: p.catalogId }] : [];
+        }),
+        ...todos.flatMap((t) => {
+          const at = parseLot(t.lot);
+          const item = catalogItem(t.place);
+          return at && item ? [{ col: at.col, row: at.row, r: clearanceLots(item), kind: item.kind, catalogId: item.id }] : [];
+        }),
+      ];
+      const push = (p: { item: CatalogItem; col: number; row: number; flip?: boolean; rot?: number; reason: string; role?: string; phase?: SceneTodo["phase"] }, zone: string) =>
+        todos.push({ id: `add-${todos.length}`, place: p.item.id, kind: p.item.kind, lot: lotId(p.col, p.row), flip: Boolean(p.flip), ...(p.rot ? { rot: p.rot } : {}), reason: p.reason, zone, role: p.role ?? "addition", phase: p.phase ?? "populate" });
+      if (intent.archetype) {
+        const archetype = intent.archetype;
+        for (const t of targets) {
+          const zone = env.zones.find((z) => z.id === t.id);
+          if (!zone) continue;
+          const only = t.added ? undefined : rolesMissingFor(intent, zone, seed, t.role);
+          if (only && !only.length) continue;
+          const result = programZone(intent, archetype, env, zone.id, bodiesNow(), seed, only, t.role);
+          for (const p of result.placements) push(p, zone.id);
+          // A reused zone that has no room for what the prompt is about
+          // (its landmark spot taken, the strip too small) gets a fresh
+          // zone of its own beside the footprint instead.
+          const starved = t.added && !t.inside ? [] : result.ledger.filter((l) => l.required && l.placed === 0).map((l) => l.role);
+          if (starved.length && added.length < 4) {
+            const role = archetype.zones.find((r) => r.role === t.role);
+            if (role) {
+              if (t.added && t.inside && !["home", "arcade", "keep", "lab"].includes(zone.type)) {
+                // The inside spot turned out too tight: take that zone back
+                // (its walk with it) so the role can own a deck of its own.
+                env = { ...env, zones: env.zones.filter((z) => z.id !== zone.id), paths: env.paths.filter((pth) => !pth.id.includes(`walk-${zone.id}`)), platforms: env.platforms.filter((pl) => pl.id !== "garden-bed" || !rectContains(zone.rect, pl.rect.c0, pl.rect.r0)) };
+                for (const q of todos.splice(0)) if (q.zone !== zone.id) todos.push(q);
+              }
+              const fresh = addZone(env, role.type, { location: role.location as ZoneLocation, size: role.size as ZoneSize, label: role.label, sceneSeed: `${seed}-${role.role}`, annex: true, id: role.role });
+              env = fresh.env;
+              useTown.getState().setEnvironment(withWaterPaint(env, meta.seed));
+              useTown.getState().bumpFocus();
+              await afterRender();
+              added.push(`${fresh.zone.id} (${fresh.zone.type}) — ${fresh.note}; ${zone.id} had no room for ${starved.join(", ")}`);
+              targets.push({ id: fresh.zone.id, added: true, role: role.role });
+              const again = programZone(intent, archetype, env, fresh.zone.id, bodiesNow(), seed, undefined, role.role);
+              for (const p of again.placements) push(p, fresh.zone.id);
+            }
+          }
+        }
+      } else {
+        // No archetype behind the words: a themed cluster in the most open
+        // zone, picked from the prompt itself.
+        const open = env.zones.filter((z) => !["home", "arcade", "keep", "lab"].includes(z.type)).sort((a, b) => b.rect.w * b.rect.d - a.rect.w * a.rect.d);
+        const zone = open[0] ?? env.zones[0];
+        if (zone) {
+          for (const spec of clusterForZone(env, zone, prompt, seed)) {
+            const item = catalogItem(spec.id);
+            if (item) push({ item, col: parseLot(spec.lot)?.col ?? zone.focal?.col ?? zone.rect.c0, row: parseLot(spec.lot)?.row ?? zone.focal?.row ?? zone.rect.r0, flip: spec.flip, rot: spec.rot, reason: spec.reason, role: "cluster" }, zone.id);
+          }
+        }
+      }
+      // Only what the ground can hold: decks for everything, water for
+      // vessels — what the grounded law will accept.
+      const grounded = todos.filter((t) => {
+        const at = parseLot(t.lot);
+        if (!at) return false;
+        if (platformAt(env, at.col, at.row)) return true;
+        const onWater = env.water.some((w) => rectContains(w.rect, at.col, at.row));
+        return onWater && (t.kind === "boat" || t.kind === "pirate");
+      });
+      const populated = grounded.length ? await applyTodos(grounded, "populate") : null;
+
+      // 3. The addition is part of the world now: validation asks for it,
+      //    the share link and remix replay it.
+      if (!bootstrapped) useTown.getState().setSceneMeta({ ...meta, additions: [...(meta.additions ?? []), prompt] });
+      useTown.getState().setValidation(null);
+      await afterRender();
+      endWrite(`built on: ${prompt}`);
+
+      // 4. Frame the new ground (and dress new water), then judge the whole.
+      const framed = await dispatch("create_environment", {});
+      const placed = (populated?.placed ?? 0) + Number(framed.placed ?? 0);
+      const summary = `built on ${meta.seed} with “${prompt}”: ${grown.added ? `island grown by ${grown.added} lots, ` : ""}${added.length} zone${added.length === 1 ? "" : "s"} added, ${targets.length - added.length} reused, ${placed} pieces`;
+      if (input.validate === false) {
+        return okWide({ noticed: summary, added_zones: added, reused_zones: targets.filter((t) => !t.added).map((t) => t.id), placed, skipped: populated?.skipped.slice(0, 8) ?? [], story: intent.story, additions: useTown.getState().sceneMeta?.additions, share_url: sceneShareUrl(), next: ["validate_scene {}", "repair_scene {} (if not complete)"] });
+      }
+      let report = await dispatch("validate_scene", {});
+      let repaired: Record<string, unknown> | null = null;
+      const budget = Math.max(0, Math.min(12, input.max_repairs == null ? 6 : Number(input.max_repairs) || 0));
+      if (report.complete !== true && budget > 0) {
+        repaired = await dispatch("repair_scene", { max: budget });
+        report = await dispatch("validate_scene", {});
+      }
+      return okWide({
+        noticed: `${summary} — ${String(report.completion)}% ${report.complete ? "complete" : "not yet complete"}`,
+        added_zones: added,
+        reused_zones: targets.filter((t) => !t.added).map((t) => t.id),
+        placed,
+        skipped: populated?.skipped.slice(0, 8) ?? [],
+        story: intent.story,
+        additions: useTown.getState().sceneMeta?.additions,
+        share_url: sceneShareUrl(),
         ...(repaired ? { repairs_applied: repaired.applied } : {}),
         validation: { complete: report.complete, completion: report.completion, verdict: report.verdict, score: report.score },
       });
@@ -2279,7 +2655,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
       const holder = occ.get(target);
       if (holder && holder.id !== piece.id) return fail(occupiedHint(target, occ).error, { empty_nearby: nearestEmpties(target, occ) });
       if (reservedLots(store.environment).has(target)) return fail(`Lot ${target} holds the stairs.`, { empty_nearby: nearestEmpties(target, occ) });
-      if (store.environment && !lotOnScene(target)) return fail(`Lot ${target} is off the scene.`, { empty_nearby: nearestEmpties(target, occ, 4, item) });
+      if (store.environment && !lotOnScene(target, item)) return fail(`Lot ${target} is off the scene${floats(item) ? "" : " (only vessels stand on water)"}.`, { empty_nearby: nearestEmpties(target, occ, 4, item) });
       if (piece.kind !== "character" && piece.kind !== "pet" && piece.kind !== "food" && clearanceLots(item) >= 0.6 && pathLots(store.environment).has(target)) {
         return fail(`Lot ${target} is a walkway — paths stay walkable.`, { empty_nearby: nearestEmpties(target, occ, 4, item) });
       }
@@ -2416,6 +2792,7 @@ export const TOWN_TOOLS: ModelContextTool[] = [
       properties: {
         max: { type: "number", description: "Repair budget this call (default 6, max 12)." },
         only: { type: "array", items: { type: "string" }, description: "Restrict to these rule ids, e.g. ['paths_clear', 'orientation']." },
+        exclude: { type: "array", items: { type: "string" }, description: "Rule ids to leave alone, e.g. ['zones'] to keep repairs from laying new ground." },
         theme: { type: "string", description: "What the scene is supposed to be (defaults to the current prompt)." },
       },
     },
@@ -2425,24 +2802,42 @@ export const TOWN_TOOLS: ModelContextTool[] = [
       if (before.complete) return ok({ noticed: `already complete (${before.completion}%) — nothing to repair`, before: before.completion, after: before.completion, applied: [], complete: true });
       const max = Math.max(1, Math.min(12, Number(input.max) || 6));
       const only = Array.isArray(input.only) ? new Set(input.only.filter((x): x is string => typeof x === "string")) : null;
-      const queue = before.checks.filter((c) => !c.ok && (!only || only.has(c.id))).sort((a, b) => Number(b.critical) - Number(a.critical)).flatMap((c) => c.repairs.map((r) => ({ ...r, rule: c.id })));
+      const exclude = new Set(Array.isArray(input.exclude) ? input.exclude.filter((x): x is string => typeof x === "string") : []);
+      const queue = before.checks.filter((c) => !c.ok && (!only || only.has(c.id)) && !exclude.has(c.id)).sort((a, b) => Number(b.critical) - Number(a.critical)).flatMap((c) => c.repairs.map((r) => ({ ...r, rule: c.id })));
       useTown.getState().setPhase("repair");
       beginWrite("repairing what validation found", null);
       const applied: { rule: string; tool: string; args: Record<string, unknown>; ok: boolean; result: string }[] = [];
       const seen = new Set<string>();
+      const sceneKey = useTown.getState().sceneMeta?.seed ?? "UNSEEDED";
+      let skippedAsTried = 0;
       for (const repair of queue) {
         if (applied.length >= max) break;
         const key = `${repair.tool}:${JSON.stringify(repair.args)}`;
         if (seen.has(key)) continue;
         seen.add(key);
+        // A repair that was tried before and left the score where it is
+        // will not help now either — skip it instead of replaying the same
+        // refused placements round after round.
+        const tried = triedRepairs.get(`${sceneKey}|${key}`);
+        if (tried != null && before.completion <= tried) {
+          skippedAsTried += 1;
+          continue;
+        }
         const result = await dispatch(repair.tool, repair.args);
-        const okResult = !result.error;
+        // "Landed" means it changed something: an error, or a placement
+        // tool that placed nothing, is not progress.
+        const placedCount = typeof result.placed === "number" ? result.placed : null;
+        const okResult = !result.error && placedCount !== 0;
         applied.push({ rule: repair.rule, tool: repair.tool, args: repair.args, ok: okResult, result: String(result.noticed ?? result.error ?? "").slice(0, 100) });
+        triedRepairs.set(`${sceneKey}|${key}`, before.completion);
       }
       const after = runValidation(theme);
+      // Anything that moved the score forward may be worth trying again later.
+      if (after.completion > before.completion) for (const a of applied) triedRepairs.delete(`${sceneKey}|${a.tool}:${JSON.stringify(a.args)}`);
       endWrite(after.complete ? `repaired — complete (${after.completion}%)` : `repaired ${applied.filter((a) => a.ok).length} — ${after.completion}%`);
       return okWide({
-        noticed: `repair: ${before.completion}% → ${after.completion}% (${applied.filter((a) => a.ok).length}/${applied.length} repairs landed)${after.complete ? " — complete" : ""}`,
+        noticed: `repair: ${before.completion}% → ${after.completion}% (${applied.filter((a) => a.ok).length}/${applied.length} repairs landed${skippedAsTried ? `, ${skippedAsTried} skipped as already tried` : ""})${after.complete ? " — complete" : ""}`,
+        landed: applied.filter((a) => a.ok).length,
         before: before.completion,
         after: after.completion,
         complete: after.complete,
@@ -2514,10 +2909,17 @@ export const TOWN_TOOLS: ModelContextTool[] = [
       const prompt = (typeof input.prompt === "string" && input.prompt.trim().slice(0, 160)) || state.sceneMeta?.prompt || state.nudgeGoal || "";
       if (!prompt) return fail("Nothing to regenerate — no current scene prompt. build_scene first.");
       const previous = state.sceneMeta?.seed;
+      const additions = state.sceneMeta?.additions ?? [];
       const seed = generateSceneSeed(prompt);
       const built = await dispatch("build_scene", { theme: prompt, seed });
       if (built.error) return fail(String(built.error));
-      return okWide({ noticed: `remixed “${prompt}”: ${previous ?? "unseeded"} → ${seed} — ${String(built.noticed)}`, seed, previous_seed: previous, share_url: sceneShareUrl(), validation: built.validation });
+      // Everything the world was grown with grows again on the new seed.
+      let validation = built.validation;
+      for (const add of additions) {
+        const grown = await dispatch("extend_scene", { prompt: add });
+        if (!grown.error) validation = grown.validation;
+      }
+      return okWide({ noticed: `remixed “${prompt}”: ${previous ?? "unseeded"} → ${seed} — ${String(built.noticed)}${additions.length ? ` (+${additions.length} addition${additions.length === 1 ? "" : "s"})` : ""}`, seed, previous_seed: previous, share_url: sceneShareUrl(), validation });
     },
   },
 ];

@@ -34,7 +34,7 @@ export type Piece = {
   bornAt: number;
 };
 
-export type ToolMode = "select" | "hand" | "place";
+export type ToolMode = "select" | "hand" | "orbit" | "place";
 
 export const LABEL_MAX_CHARS = 40;
 

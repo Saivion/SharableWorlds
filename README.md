@@ -1,94 +1,81 @@
 # SharableWorlds
 
-**Build a 3D miniature world with an AI agent — in your browser, on a real grid, with a shareable seed.**
+**A WebMCP world studio — humans and agents build the same 3D miniature together, on a real grid, with a shareable seed.**
 
-SharableWorlds is an isometric diorama studio where humans and WebMCP agents compose scenes together. You describe a place (“a harbor full of fishing boats”), the agent plans and builds it piece by piece on a lot grid, and you get a **World Pass** — a link that rebuilds the exact same world for anyone who opens it.
+You describe a place (“a harbor full of fishing boats”). The page registers site tools. A WebMCP agent plans, composes, places, inspects, and repairs until the scene actually reads as what you asked for. You can paint pieces yourself; the agent builds around what you locked. Anyone with the link gets the same world.
 
----
+[Live demo](https://twominds.j8vpkjs9pw.workers.dev/) · [Source](https://github.com/Saivion/TwoMinds) · License: [MIT](./LICENSE)
 
-## The problem
-
-Most “AI builds a scene” demos are opaque: the model dumps objects into 3D space with raw coordinates, you cannot tell if it succeeded, and the result is not reproducible or shareable.
-
-We wanted something different:
-
-1. **Agents need structure, not coordinates.** A picnic table belongs *in the picnic zone*, facing the grill — not at `(12.4, 0, -3.1)`.
-2. **Tool success ≠ scene success.** Placing 47 pieces does not mean the scene *reads* as what you asked for.
-3. **Humans and agents must coexist.** If you place a character yourself, the agent should build around it — not overwrite it.
-4. **The result should travel.** Same seed → same world, shareable as a link or sticker.
+No login. Open the live URL in **ChatGPT’s in-app browser** or **Chrome with WebMCP enabled**. Footer should read **WebMCP on**.
 
 ---
 
-## What we built
+## Why this is a strong fit for WebMCP
 
-A **composed 3D diorama** (Three.js, orthographic isometric camera) on top of a discrete lot grid:
+WebMCP is for when the *page* is the environment the model should act in — not a remote API with a chat bolted on.
 
-- **Environment first** — platforms, walls, stairs, paths, water, and named zones establish the place.
-- **Pieces second** — 1,800+ Kenney GLB models placed *on* that architecture, one per lot.
-- **WebMCP as the only write path** — every mutation goes through registered browser tools; the UI and the agent share the same API.
-- **A scored lifecycle** — plan → compose → populate → frame → inspect → validate → repair until the scene actually matches the request.
-- **Deterministic seeds** — `BUSY-JWCV8B` rebuilds the same market, harbor, or dungeon every time.
+SharableWorlds is that environment. The canvas, the lot grid, the catalog, and the completeness score all live in the browser. An agent should not invent coordinates or dump a glTF. It should speak the page’s language: lots (`C4`), zones (`picnic`), relationships (`east of the grill`), and a scored loop until `complete: true`.
 
-Humans can also build by hand (palette, paint, undo) with no agent at all. Human-placed lots are **locked**; agents must skip them.
+`document.modelContext.registerTool` is the only write path. The human UI, Surprise Me, share-link replay, and an attached agent all call the same tools. If a host cannot see the tools, the agent cannot build. That is the point of WebMCP: the site is the capability surface.
 
 ---
 
-## WebMCP tools
+## How it is a better experience
 
-The page registers **site tools** on `document.modelContext` (WebMCP). An agent never sees raw x/y — it speaks in **lots** (`C4`), **zones** (`picnic`), and **relationships** (`east of barrel-1`).
+Typical “AI 3D” demos are opaque. The model places objects at raw x/y/z, you cannot tell if it succeeded, and the result is not shareable.
 
-### Read (look before you write)
+Here the loop is visible and collaborative:
 
-| Tool | What it does |
-|------|----------------|
-| `get_occupancy` | **Start here.** Map state, standing goal, human locks, current phase, and `next_step` hint. |
-| `get_scene_rules` | World-building laws, archetypes, themes, and how scoring works. |
-| `get_scene` | Paged scene snapshot — pieces, zones, environment summary. |
-| `inspect_region` | Zoom into a zone or lot neighborhood. |
-| `lookup_object` | Full placement record for one piece. |
-| `list_catalog` | Search 1,813 Kenney pieces by pack, kind, or query. |
-| `get_selection` | What the human currently has selected. |
-| `validate_scene` | **The arbiter of done.** Six-dimension completeness score + structured repair list. |
-| `get_scene_seed` | Current seed metadata. |
+1. **Structure, not coordinates.** A picnic table belongs *in the picnic zone*, facing the grill.
+2. **Tool success ≠ scene success.** `validate_scene` scores six dimensions. Placing 47 pieces is not done.
+3. **The human stays on the board.** Kit-placed lots are locked. The agent must skip them and build around them.
+4. **The result travels.** Same seed → same world. Share a World Pass link or PNG sticker.
 
-### Lifecycle (build a world)
+The top bar shows **Scene Complete**, a completeness badge, and a **Details** panel with pieces, scores, and a live WebMCP trace. You watch the agent work the same tools you could call.
 
-| Tool | What it does |
-|------|----------------|
-| `plan_scene` | Understand the prompt → scene archetype + story. **Read-only** — no mutation. |
-| `compose_scene` | Architecture: footprint, zones, walls, stairs, paths, terrain, water. |
-| `populate_zones` | Story objects per zone (stalls, trees, characters) via composition grammar. |
-| `create_environment` | Boundary framing and ground texture. |
-| `build_scene` | Runs the full lifecycle in one call when the agent cannot steer step by step. |
-| `repair_scene` | Applies `validate_scene` repairs through the other tools, then re-validates. |
+---
 
-### Incremental (grow or fix)
+## What people and agents can do together
 
-| Tool | What it does |
-|------|----------------|
-| `create_zone` | Add a named functional zone. |
-| `create_path` | Carve a walkway between zones. |
-| `create_focal_point` | Anchor a landmark in a zone. |
-| `create_prop_cluster` | Place a themed cluster (archetype-driven). |
-| `create_vegetation` | Trees and plants, seed-pure. |
-| `create_ground_patch` | Paint terrain material on lots. |
-| `apply_theme` | Set the visual theme (grass, sand, stone, …). |
-| `place_piece` | Place one catalog item on a lot. |
-| `place_batch` | Place many items in one decision (nested in trace). |
-| `move_piece` | Relocate with strategies (`into_zone`, `away_from`, off path). |
-| `orient_piece` | Rotate a piece to face an anchor. |
-| `label_piece` / `remove_piece` | Rename or delete. |
-| `tell_story` | Narrate what the agent noticed (status chip). |
+Things that were awkward or impossible when the model only had a chat box and a file:
 
-### Seeds (reproducibility)
+| Together | Why it needed WebMCP |
+| --- | --- |
+| You drop a character on a lot; the agent composes a harbor around it | Human locks are first-class occupancy the tools must honor |
+| You say “add a fishing dock with boats” to a finished village | `extend_scene` is additive — nothing standing is replaced |
+| You paint a few trees, then ask the agent to finish the forest camp | Shared occupancy map: agent reads `human_locks`, writes only empty lots |
+| Either of you shares the world | Seed + prompt replay through the same tools; no coordinate dump in the URL |
+| You undo, flip, or drag a piece while the agent is between calls | One Zustand world. Next `get_occupancy` sees what you changed |
 
-| Tool | What it does |
-|------|----------------|
-| `generate_scene_seed` | Mint a new seed string. |
-| `set_scene_seed` | Apply a seed (rebuilds from it). |
-| `regenerate_scene` | New seed, same prompt — a different take. |
+The agent never imports Three.js. The renderer only reads world state. People act with the kit and rails; agents act with tools; both land on the same lots.
 
-### Typical agent loop
+---
+
+## How WebMCP is implemented
+
+On load, the studio registers every site tool on **`document.modelContext`** (fallback: `navigator.modelContext`). Registration lives in [`lib/town.ts`](lib/town.ts). Executes mutate Zustand; React Three Fiber renders.
+
+```js
+document.modelContext.registerTool({
+  name: "list_catalog",
+  description: "Search the Kenney piece catalog",
+  inputSchema: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "Substring of id or label" },
+      pack: { type: "string" },
+      kind: { type: "string" },
+    },
+  },
+  execute: async (input) => {
+    /* filter 1,813 pieces; return ids the agent can place */
+  },
+});
+```
+
+The same shape is used for every tool: `name`, `description`, `inputSchema`, `execute`. Writes are instrumented into the Details trace (tool, args, timing, nested children).
+
+**Lifecycle the agent is steered through:**
 
 ```
 get_occupancy
@@ -98,74 +85,122 @@ get_occupancy
   → create_environment
   → get_scene / inspect_region
   → validate_scene
-  → repair_scene (repeat until complete: true)
+  → repair_scene   (repeat until complete: true)
 ```
 
-Small edits (“add a tree by the house”) use **one** targeted call — not a full rebuild.
+Small edits are one targeted call (`place_piece`, `create_vegetation`, `move_piece`). Growing a standing world is `extend_scene`, never a rebuild.
 
-The **Details** panel in the top pill shows the live trace, completeness score, and pieces placed.
+Surprise Me and share-URL boot call these same executes when no host is attached, so the page still works in ordinary Chrome — and the trace still shows WebMCP-shaped work.
 
 ---
 
-## Try it
+## Try it (judges)
+
+**Live:** [https://twominds.j8vpkjs9pw.workers.dev/](https://twominds.j8vpkjs9pw.workers.dev/)
+
+Hosted on Cloudflare Workers. No auth.
+
+1. Open the URL in ChatGPT’s in-app browser, or Chrome with WebMCP.
+2. Confirm the footer: **WebMCP on**.
+3. Ask: *“Build a backyard picnic with burgers and cake.”*
+4. Watch Details: plan → compose → populate → validate → repair.
+5. Open the kit, place a piece, then **Build On with Agent** — e.g. *“a fishing harbor with boats at anchor.”*
+6. **Share** on the seed chip for a World Pass that rebuilds the world.
+
+Without a WebMCP host, **Surprise Me** still runs the full lifecycle through the same tools.
+
+---
+
+## Tools
+
+Agents never see raw x/y. They speak lots, zones, and relationships.
+
+### Read
+
+| Tool | Role |
+| --- | --- |
+| `get_occupancy` | Start here. Map, goal, human locks, phase, `next_step`. |
+| `get_scene_rules` | Laws, archetypes, themes, scoring. |
+| `get_scene` | Paged snapshot of pieces, zones, environment. |
+| `inspect_region` | One zone or neighborhood. |
+| `lookup_object` | One piece’s placement record. |
+| `list_catalog` | Search 1,813 Kenney pieces. |
+| `get_selection` | What the human has selected. |
+| `validate_scene` | Six-dimension score + structured repairs. |
+| `get_scene_seed` | Current seed metadata. |
+
+### Lifecycle
+
+| Tool | Role |
+| --- | --- |
+| `plan_scene` | Prompt → archetype + story. Read-only. |
+| `compose_scene` | Footprint, zones, walls, stairs, paths, water. |
+| `populate_zones` | Story objects per zone. |
+| `create_environment` | Boundary and ground. |
+| `build_scene` | Full loop in one call (nested in the trace). |
+| `extend_scene` | Additive grow. Does not replace what stands. |
+| `repair_scene` | Applies `validate_scene` repairs, then re-scores. |
+
+### Incremental
+
+`create_zone`, `create_path`, `create_focal_point`, `create_prop_cluster`, `create_vegetation`, `create_ground_patch`, `apply_theme`, `place_piece`, `place_batch`, `move_piece`, `orient_piece`, `label_piece`, `remove_piece`, `tell_story`.
+
+### Seeds
+
+`generate_scene_seed`, `set_scene_seed`, `regenerate_scene`.
+
+---
+
+## Scoring
+
+`validate_scene` weights:
+
+| Dimension | Weight |
+| --- | --- |
+| Intent coverage | 30% |
+| Composition | 20% |
+| Spatial coherence | 15% |
+| Navigation | 15% |
+| Environment | 10% |
+| Placement validity | 10% |
+
+**Complete** at ≥ 85% with no critical failures. Failures return `{ tool, args, why }` for `repair_scene`.
+
+---
+
+## Run locally
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open **http://localhost:3000** (WebMCP requires HTTPS or localhost).
-
-| Action | How |
-|--------|-----|
-| Build with an agent | In a WebMCP-enabled browser: *"Build a backyard picnic with burgers and cake."* |
-| Surprise Me | Top-right button — same pipeline, no chat required. |
-| Build by hand | Open the kit palette, click a piece, click a lot. |
-| Share | **Share** on the seed chip → World Pass link or PNG sticker. |
-| Debug lots | Append `?debug` to the URL. |
-
-**Headless tests:**
+Open [http://localhost:3000](http://localhost:3000) (WebMCP requires HTTPS or localhost).
 
 ```bash
-npm test              # seed determinism + lifecycle scenarios
+npm test              # seed determinism + lifecycle
 npm run test:scenes   # 32 scene lifecycle checks
+npm run cf:deploy     # static export → Cloudflare Worker
 ```
 
----
-
-## How scoring works
-
-`validate_scene` scores six dimensions:
-
-| Dimension | Weight | Checks |
-|-----------|--------|--------|
-| Intent coverage | 30% | Does the scene contain what was asked for? |
-| Composition | 20% | Landmark, focal clearance, zone grammar. |
-| Spatial coherence | 15% | Zones furnished, seats face the action. |
-| Navigation | 15% | Paths connect zones; stairs work. |
-| Environment | 10% | Grounded, framed, themed. |
-| Placement validity | 10% | No overlaps; pieces match the plan. |
-
-**Complete** at ≥ 85% with no critical failures. Failures return structured repairs: `{ tool, args, why }` for `repair_scene` to apply.
+Deploy notes: [docs/DEPLOY-CLOUDFLARE.md](docs/DEPLOY-CLOUDFLARE.md). Composition internals: [docs/COMPOSITION.md](docs/COMPOSITION.md).
 
 ---
 
 ## Stack
 
-- **Next.js** + React 19
-- **Three.js** / react-three-fiber — isometric diorama renderer
-- **Zustand** — world state (lots, zones, pieces, trace)
-- **WebMCP** — `document.modelContext.registerTool` site tools
-- **Kenney** CC0 assets — 22 packs, 1,813 catalogued GLBs
+- **Next.js** 16 (static export) + React 19
+- **Three.js** / react-three-fiber — isometric diorama
+- **Zustand** — lots, zones, pieces, trace
+- **WebMCP** — `document.modelContext.registerTool`
+- **Kenney** CC0 — 22 packs, 1,813 GLBs
 
-Composition logic lives in `lib/composition/` (intent, archetypes, compose, validate). The renderer in `components/stage3d/` only reads state — tools never import Three.js.
+Composition lives in `lib/composition/`. Tools live in `lib/town.ts`. The renderer in `components/stage3d/` only reads state.
 
 ---
 
-## Credits
+## License
 
-All art is [Kenney](https://kenney.nl), CC0 — Mini Arcade, Arena, Characters, Dungeon, Forest, Market, Skate, Watercraft, Pirate Kit, Car Kit, and more. See `public/assets/kenney/LICENSE-kenney.txt`.
+[MIT](./LICENSE) for the application source.
 
-## Deploy
-
-The site is a static export served by a Cloudflare Worker. `npm run cf:deploy` builds and ships it; see [docs/DEPLOY-CLOUDFLARE.md](docs/DEPLOY-CLOUDFLARE.md) for login, custom domains, and CI.
+Art is [Kenney](https://kenney.nl), CC0 — see `public/assets/kenney/LICENSE-kenney.txt`.

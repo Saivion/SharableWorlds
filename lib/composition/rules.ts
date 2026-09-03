@@ -46,6 +46,9 @@ export type RuleContext = {
   prompt?: string;
   plan: ComposedPlan | null;
   intent: SceneIntent | null;
+  /** Intents the scene was grown with (extend_scene) — their required and
+   * supporting elements count toward coverage alongside the base's. */
+  extras: SceneIntent[];
   sceneSeed?: string;
 };
 
@@ -78,13 +81,14 @@ export function buildRuleContext(
   prompt?: string,
   plan: ComposedPlan | null = null,
   sceneSeed?: string,
+  extras: SceneIntent[] = [],
 ): RuleContext {
   const located = Object.values(pieces).flatMap((p) => {
     const at = parseLotId(p.lot);
     return at ? [{ piece: p, at, item: catalogItem(p.catalogId) }] : [];
   });
   const intent = plan?.intent ?? (prompt?.trim() ? understandIntent(prompt) : null);
-  return { env, pieces, located, theme: themeById(env?.themeId), prompt, plan, intent, sceneSeed };
+  return { env, pieces, located, theme: themeById(env?.themeId), prompt, plan, intent, extras, sceneSeed };
 }
 
 // ---------------------------------------------------------------------------
@@ -118,7 +122,7 @@ function cheb(a: { col: number; row: number }, b: { col: number; row: number }) 
 
 /** Pool of catalog ids an archetype element may be made of. */
 const poolCache = new Map<string, Set<string>>();
-function elementPool(el: ElementSpec, seed: string): Set<string> {
+export function elementPool(el: ElementSpec, seed: string): Set<string> {
   const key = `${seed}|${el.role}|${el.zone}`;
   const cached = poolCache.get(key);
   if (cached) return cached;
@@ -129,10 +133,40 @@ function elementPool(el: ElementSpec, seed: string): Set<string> {
 
 /** Pieces that satisfy one archetype element: right catalog family, inside
  * (or right beside) the element's zone. */
+/**
+ * The zone an element lives in. Base scenes name zones after archetype
+ * roles, so the id matches; a zone annexed for an addition (extend_scene /
+ * create_zone) is named after its type, so fall back to the type of the
+ * role in whichever intent owns the element.
+ */
+function zoneOfElement(ctx: RuleContext, el: ElementSpec): { zone: ZoneSpec; exact: boolean } | null {
+  const env = ctx.env;
+  if (!env) return null;
+  const byId = env.zones.find((z) => z.id === el.zone);
+  if (byId) return { zone: byId, exact: true };
+  for (const intent of [ctx.intent, ...ctx.extras]) {
+    const archetype = intent?.archetype;
+    if (!archetype?.elements.includes(el)) continue;
+    const role = archetype.zones.find((r) => r.role === el.zone);
+    if (!role) continue;
+    const byType = env.zones.find((z) => z.type === role.type);
+    if (byType) return { zone: byType, exact: false };
+  }
+  return null;
+}
+
+/** Zone id to name in a repair — the real one when the scene has it. */
+function zoneIdFor(ctx: RuleContext, el: ElementSpec): string {
+  return zoneOfElement(ctx, el)?.zone.id ?? el.zone;
+}
+
 function piecesFor(ctx: RuleContext, el: ElementSpec): RuleContext["located"] {
   const seed = ctx.plan?.seed ?? ctx.sceneSeed ?? "UNSEEDED";
   const pool = elementPool(el, seed);
-  const zone = ctx.env?.zones.find((z) => z.id === el.zone);
+  // An addition's elements are placed relative to a reused zone, not inside
+  // it — only a zone matched by name fences the count.
+  const hit = zoneOfElement(ctx, el);
+  const zone = hit?.exact ? hit.zone : null;
   return ctx.located.filter(({ piece, at }) => {
     if (!pool.has(piece.catalogId)) return false;
     if (!zone) return true;
@@ -141,11 +175,11 @@ function piecesFor(ctx: RuleContext, el: ElementSpec): RuleContext["located"] {
 }
 
 function requiredElements(ctx: RuleContext): ElementSpec[] {
-  return ctx.intent?.archetype?.elements.filter((e) => e.required) ?? [];
+  return [ctx.intent, ...ctx.extras].flatMap((i) => i?.archetype?.elements.filter((e) => e.required) ?? []);
 }
 
 function supportingElements(ctx: RuleContext): ElementSpec[] {
-  return ctx.intent?.archetype?.elements.filter((e) => e.supporting) ?? [];
+  return [ctx.intent, ...ctx.extras].flatMap((i) => i?.archetype?.elements.filter((e) => e.supporting) ?? []);
 }
 
 /** Zone-type grammar: what kinds of piece count as "furnishing" a zone. */
@@ -181,7 +215,7 @@ function focalPieceOf(ctx: RuleContext): { piece: Piece; at: { col: number; row:
   if (arch) {
     const el = arch.elements.find((e) => e.arrange === "focal" && e.zone === arch.focalZone);
     if (el) {
-      const zone = ctx.env?.zones.find((z) => z.id === el.zone);
+      const zone = zoneOfElement(ctx, el)?.zone ?? null;
       const hits = piecesFor(ctx, el).filter((h) => !zone?.focal || cheb(h.at, zone.focal) <= 2);
       if (hits[0]) return hits[0];
     }
@@ -260,7 +294,9 @@ export const SCENE_RULES: SceneRule[] = [
       const arch = ctx.intent?.archetype;
       if (arch) {
         const want = arch.zones;
-        const missing = want.filter((z) => !present.has(z.role) && !(z.type === "plaza" && presentTypes.has("plaza")));
+        // A zone named after its type (annexed by extend_scene / create_zone)
+        // satisfies the role just as one named after the role does.
+        const missing = want.filter((z) => !present.has(z.role) && !presentTypes.has(z.type));
         return {
           ok: missing.length === 0,
           score: want.length ? (want.length - missing.length) / want.length : 1,
@@ -294,7 +330,7 @@ export const SCENE_RULES: SceneRule[] = [
       const required = requiredElements(ctx);
       const missing = required.filter((el) => piecesFor(ctx, el).length < Math.max(1, Math.ceil(el.count[0] / 2)));
       const byZone = new Map<string, string[]>();
-      for (const el of missing) byZone.set(el.zone, [...(byZone.get(el.zone) ?? []), el.role]);
+      for (const el of missing) byZone.set(zoneIdFor(ctx, el), [...(byZone.get(zoneIdFor(ctx, el)) ?? []), el.role]);
       return {
         ok: missing.length === 0,
         score: (required.length - missing.length) / required.length,
@@ -316,12 +352,12 @@ export const SCENE_RULES: SceneRule[] = [
       const missing = supporting.filter((el) => piecesFor(ctx, el).length === 0);
       const share = (supporting.length - missing.length) / supporting.length;
       const byZone = new Map<string, string[]>();
-      for (const el of missing) byZone.set(el.zone, [...(byZone.get(el.zone) ?? []), el.role]);
+      for (const el of missing) byZone.set(zoneIdFor(ctx, el), [...(byZone.get(zoneIdFor(ctx, el)) ?? []), el.role]);
       return {
         ok: share >= 0.6,
         score: share,
         note: missing.length ? `${supporting.length - missing.length}/${supporting.length} supporting elements present; missing ${missing.map((e) => e.label).slice(0, 5).join(", ")}` : "every supporting element is present",
-        fix: missing.length ? `populate_zones {zones: ["${missing[0].zone}"]}` : undefined,
+        fix: missing.length ? `populate_zones {zones: ["${zoneIdFor(ctx, missing[0])}"]}` : undefined,
         repairs: [...byZone.entries()].map(([zone, roles]) => ({ tool: "populate_zones", args: { zones: [zone], only: roles }, why: `supporting ${roles.join(", ")} missing from ${zone}` })),
       };
     },
@@ -342,7 +378,7 @@ export const SCENE_RULES: SceneRule[] = [
         ok: Boolean(focal),
         note: focal ? `${focal.piece.id} anchors the scene${el ? ` (${el.label})` : ""}` : el ? `no ${el.label} at ${arch?.focalZone}'s focal point` : "no landmark at any zone's focal point",
         fix: "create_focal_point",
-        repairs: focal ? [] : [{ tool: "create_focal_point", args: el ? { zone: el.zone } : {}, why: "the scene has no anchor" }],
+        repairs: focal ? [] : [{ tool: "create_focal_point", args: el ? { zone: zoneIdFor(ctx, el) } : {}, why: "the scene has no anchor" }],
       };
     },
   },
@@ -374,7 +410,9 @@ export const SCENE_RULES: SceneRule[] = [
     check: (ctx) => {
       const n = ctx.located.filter(({ piece }) => piece.kind === "character").length;
       const want = ctx.intent?.archetype?.people.count[0] ?? 2;
-      const nearZone = ctx.intent?.archetype?.people.near[0];
+      const nearRole = ctx.intent?.archetype?.people.near[0];
+      const nearType = ctx.intent?.archetype?.zones.find((z) => z.role === nearRole)?.type;
+      const nearZone = ctx.env?.zones.find((z) => z.id === nearRole)?.id ?? ctx.env?.zones.find((z) => z.type === nearType)?.id ?? nearRole;
       return {
         ok: n >= want,
         score: Math.min(1, n / want),

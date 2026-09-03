@@ -6,9 +6,10 @@ import {
   Crosshair,
   FlipHorizontal2,
   Hand,
-  LayoutGrid,
   MousePointer2,
+  PencilRuler,
   RefreshCw,
+  Rotate3d,
   Trash2,
   Undo2,
   X,
@@ -52,6 +53,10 @@ export function HandIcon(props: Props) {
   return <RailLucide icon={Hand} {...props} />;
 }
 
+export function OrbitIcon(props: Props) {
+  return <RailLucide icon={Rotate3d} {...props} />;
+}
+
 export function AboutIcon(props: Props) {
   return <RailLucide icon={BookOpen} {...props} />;
 }
@@ -77,7 +82,7 @@ export function CloseIcon(props: Props) {
 }
 
 export function KitIcon(props: Props) {
-  return <RailLucide icon={LayoutGrid} {...props} />;
+  return <RailLucide icon={PencilRuler} {...props} />;
 }
 
 export function NudgeIcon(props: Props) {

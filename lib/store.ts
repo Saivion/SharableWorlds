@@ -106,6 +106,8 @@ export type TownStore = {
   nudgeGoal: string | null;
   /** Bumped on every goal commit — re-committing the same text re-triggers. */
   nudgeToken: number;
+  /** fresh = a new world (the board is wiped); extend = build on what stands. */
+  nudgeMode: "fresh" | "extend";
   tool: ToolMode;
   /** Catalog id armed for placement when tool === "place". */
   activeId: string | null;
@@ -141,6 +143,8 @@ export type TownStore = {
   setKitOpen: (open: boolean) => void;
   bumpFocus: () => void;
   setNudgeGoal: (goal: string | null) => void;
+  /** Commit a goal that grows the current world — nothing is cleared. */
+  extendGoal: (goal: string) => void;
   setTool: (tool: ToolMode) => void;
   setActiveId: (id: string | null) => void;
   pushUndo: (entry: UndoEntry) => void;
@@ -181,6 +185,7 @@ export const useTown = create<TownStore>((set, get) => ({
   focusToken: 0,
   nudgeGoal: null,
   nudgeToken: 0,
+  nudgeMode: "fresh",
   tool: "select",
   activeId: "characters-character-female-a",
   undoStack: [],
@@ -297,10 +302,26 @@ export const useTown = create<TownStore>((set, get) => ({
         lastError: null,
         kitOpen: false,
         nudgeGoal: trimmed,
+        nudgeMode: "fresh",
         nudgeToken: state.nudgeToken + 1,
         events,
       };
     });
+  },
+  extendGoal: (goal) => {
+    const trimmed = goal.trim().slice(0, NUDGE_MAX_CHARS);
+    if (!trimmed) return;
+    set((state) => ({
+      nudgeGoal: trimmed,
+      nudgeMode: "extend",
+      nudgeToken: state.nudgeToken + 1,
+      validation: null,
+      lastError: null,
+      events: [
+        ...state.events,
+        { t: Date.now(), actor: "human" as const, verb: "goal" as const, goal: trimmed, detail: "building on the current world" },
+      ].slice(-EVENTS_MAX),
+    }));
   },
   setTool: (tool) => set({ tool }),
   setActiveId: (activeId) => set({ activeId }),

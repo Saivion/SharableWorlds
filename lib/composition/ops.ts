@@ -159,13 +159,17 @@ function ensureFooting(env: EnvironmentSpec): EnvironmentSpec {
 
 /** Find a w×d rect fully on the deck near one side, clear of other zones
  * and stairs (the plaza doesn't count — it's the leftover). */
-function freeInsideRect(env: EnvironmentSpec, w: number, d: number, location: ZoneLocation): LotRect | null {
+function freeInsideRect(env: EnvironmentSpec, w: number, d: number, location: ZoneLocation, blocked?: Set<string>): LotRect | null {
   const deck = deckInfo(env);
   if (!deck) return null;
   const m = deck.mask.bbox;
   const taken = [
     ...env.zones.filter((z) => z.type !== "plaza").map((z) => z.rect),
     ...env.stairs.map((s) => ({ c0: s.at.col, r0: s.at.row, w: 1, d: 1 })),
+    ...[...(blocked ?? [])].map((k) => {
+      const [c, r] = k.split(":").map(Number);
+      return { c0: c, r0: r, w: 1, d: 1 };
+    }),
   ];
   const bias =
     location === "north"
@@ -215,14 +219,25 @@ export type AddZoneResult = { env: EnvironmentSpec; zone: ZoneSpec; note: string
 export function addZone(
   current: EnvironmentSpec | null,
   type: ZoneType,
-  opts: { location?: ZoneLocation; size?: ZoneSize; label?: string; sceneSeed?: string } = {},
+  opts: {
+    location?: ZoneLocation;
+    size?: ZoneSize;
+    label?: string;
+    sceneSeed?: string;
+    /** Always annex new ground beside the footprint, never squeeze inside. */
+    annex?: boolean;
+    /** Preferred zone id (an archetype role name); made unique if taken. */
+    id?: string;
+    /** Cells ("col:row") holding pieces — an inside spot never lands on them. */
+    blocked?: Set<string>;
+  } = {},
 ): AddZoneResult {
   const env = ensureFooting(cloneEnv(current));
   const deck = deckInfo(env)!;
   const location = opts.location ?? DEFAULT_LOCATION[type] ?? "center";
   const { w, d } = sizeDims(type, opts.size ?? "medium");
   const label = opts.label?.slice(0, 40) || ZONE_LABEL[type];
-  const zoneId = uniqueId(env, type);
+  const zoneId = uniqueId(env, opts.id?.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-") || type);
   let note = "";
 
   let rect: LotRect;
@@ -254,7 +269,7 @@ export function addZone(
     env.platforms.push({ id: uniqueId(env, "rise"), rect, level: 1, material: "grass" });
     note = "backdrop rise raised";
   } else {
-    const inside = freeInsideRect(env, w, d, location);
+    const inside = opts.annex ? null : freeInsideRect(env, w, d, location, opts.blocked);
     if (inside) {
       rect = inside;
       note = "placed on the main platform";

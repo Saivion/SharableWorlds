@@ -1,3 +1,4 @@
+import type { SceneIntent } from "./intent";
 import type { Piece } from "../types";
 import type { ComposedPlan } from "./compose";
 import { buildRuleContext, SCENE_RULES, type Repair, type ScoreDimension } from "./rules";
@@ -65,8 +66,9 @@ export function validateScene(
   theme?: string,
   plan: ComposedPlan | null = null,
   sceneSeed?: string,
+  extras: SceneIntent[] = [],
 ): ValidationReport {
-  const ctx = buildRuleContext(env, pieces, theme, plan, sceneSeed);
+  const ctx = buildRuleContext(env, pieces, theme, plan, sceneSeed, extras);
   const checks: ValidationCheck[] = SCENE_RULES.filter((rule) => rule.when(ctx)).map((rule) => {
     const result = rule.check(ctx);
     const score = Math.max(0, Math.min(1, result.ok ? 1 : (result.score ?? 0)));

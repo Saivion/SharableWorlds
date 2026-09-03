@@ -996,10 +996,14 @@ export function programZone(
   occupied: Iterable<OccupiedBody>,
   seed: string,
   only?: string[],
+  /** The archetype role to program into the zone, when the zone's own name
+   * or type would be ambiguous (two garden roles, one garden zone). */
+  roleId?: string,
 ): ZoneProgramResult {
   const zone = env.zones.find((z) => z.id === zoneId) ?? env.zones.find((z) => z.type === zoneId);
   if (!zone) return { placements: [], ledger: [], missing: [] };
   const role: ZoneRole =
+    (roleId ? archetype.zones.find((z) => z.role === roleId) : undefined) ??
     archetype.zones.find((z) => z.role === zone.id) ??
     archetype.zones.find((z) => z.type === zone.type) ?? {
       role: zone.id,

@@ -14,8 +14,10 @@ import {
   easeOut,
   legoPop,
   startFoundationWave,
+  waveFor,
   waveOrigin,
 } from "./legoDrop";
+import { countRender, renderClock } from "./stageState";
 import { GROUND_SUB, blockHex, blockLift, getGrainTexture, hash2, isPebble, isRubble, pathHexFor, rubbleHex, rubbleShape, waterHex } from "./terrainLook";
 
 /**
@@ -58,11 +60,11 @@ type Brick = {
 
 /** One bit of debris: which instanced mesh it lives in (`shape`), its slot
  * there, and its own scale and spin. */
-type RubbleBrick = Brick & { sx: number; sz: number; ry: number; shape: 0 | 1 | 2; slot: number };
+type RubbleBrick = Brick & { gx: number; gz: number; sx: number; sz: number; ry: number; shape: 0 | 1 | 2; slot: number; /** A piece stands on this lot — the debris gives way. */ hidden: boolean };
 
 const RUBBLE_SHAPES = 3;
 
-function GroundBlocks({
+const GroundBlocks = memo(function GroundBlocks({
   rect,
   top,
   bottom,
@@ -72,6 +74,7 @@ function GroundBlocks({
   cellMaterial,
   cellWaterTone,
   cellBottom,
+  occupied,
 }: {
   rect: LotRect;
   top: number;
@@ -79,6 +82,9 @@ function GroundBlocks({
   material: PlatformMaterial;
   origin: number;
   kind?: "land" | "water";
+  /** Lots ("col:row") that hold a piece — rubble there is hidden so nothing
+   * stands on a rock or in a pebble. */
+  occupied?: Set<string>;
   /** Per-lot column base — a stacked tier starts where the tier beneath
    * ends instead of sharing (and z-fighting) the lower column's faces. */
   cellBottom?: (col: number, row: number) => number;
@@ -94,6 +100,9 @@ function GroundBlocks({
   const done = useRef(false);
   const rest = useRef<Brick[]>([]);
   const rubbleRest = useRef<RubbleBrick[]>([]);
+  // Occupancy is read through a ref by the brick build and APPLIED by its
+  // own effect: a placement touches the rubble on one lot, never the island.
+  const occupiedRef = useRef(occupied);
   const wet = kind === "water";
   const sub = GROUND_SUB;
   const size = TILE / sub;
@@ -130,8 +139,18 @@ function GroundBlocks({
     return counts;
   }, [rubbleSpots]);
 
+  const originRef = useRef(origin);
   useLayoutEffect(() => {
-    born.current = currentWave()?.born ?? performance.now();
+    // The drop clock is set ONCE per mount. A re-run (a neighbour changed,
+    // a pad appeared, a callback prop was re-created) rebuilds the matrices
+    // but keeps the clock, so bricks that have landed stay landed — the
+    // next frame snaps them straight to their resting pose.
+    if (born.current === 0) {
+      const clock = waveFor({ c0: rect.c0, r0: rect.r0 });
+      born.current = clock.born;
+      originRef.current = clock.origin;
+    }
+    const origin = originRef.current;
     done.current = false;
     const mesh = meshRef.current;
     if (!mesh) return;
@@ -206,7 +225,10 @@ function GroundBlocks({
           sy = rh / 0.12;
           sz = 0.75 + ((h >>> 2) % 4) * 0.15;
         }
+        const hidden = occupiedRef.current?.has(`${Math.floor(spot.gx / sub)}:${Math.floor(spot.gz / sub)}`) ?? false;
         const cell: RubbleBrick = {
+          gx: spot.gx,
+          gz: spot.gz,
           x: spot.x + jx,
           y: top + DECK_BLOCK + lift + rh / 2,
           z: spot.z + jz,
@@ -216,6 +238,7 @@ function GroundBlocks({
           ry,
           shape: spot.shape,
           slot: spot.slot,
+          hidden,
           delay: dropDelay(spot.gx, spot.gz, origin),
         };
         rubbleCells.push(cell);
@@ -236,7 +259,46 @@ function GroundBlocks({
       }
     }
     rubbleRest.current = rubbleCells;
+    countRender("groundRebuilds");
+    // Bricks fall (or, on a re-run, snap to rest): ask the on-demand
+    // renderer for frames until they land.
+    renderClock.animating();
+    // `occupied` is deliberately not a dependency — see the effect below.
   }, [rect.c0, rect.r0, rect.w, rect.d, material, wet, top, bottom, origin, sub, size, dummy, rubbleSpots, cellMaterial, cellWaterTone, cellBottom]);
+
+  // Rubble gives way under a piece. Only the debris whose lot changed hands
+  // is rewritten — a handful of matrices per placement, not every brick of
+  // the island (which is what re-running the build above used to cost).
+  useLayoutEffect(() => {
+    occupiedRef.current = occupied;
+    let changed = 0;
+    for (const cell of rubbleRest.current) {
+      const hidden = occupied?.has(`${Math.floor(cell.gx / sub)}:${Math.floor(cell.gz / sub)}`) ?? false;
+      if (hidden === cell.hidden) continue;
+      // The resting cells are render-loop scratch owned by this component
+      // (same as the frame loop's matrix writes) — not React state.
+      // eslint-disable-next-line react-hooks/immutability
+      cell.hidden = hidden;
+      changed += 1;
+      // Mid-drop the frame loop applies `hidden`; once landed, write the
+      // resting pose here.
+      if (!done.current) continue;
+      const rubble = rubbleRefs.current[cell.shape];
+      if (!rubble) continue;
+      dummy.rotation.set(0, cell.ry, 0);
+      dummy.position.set(cell.x, cell.y, cell.z);
+      if (hidden) dummy.scale.set(0.0001, 0.0001, 0.0001);
+      else dummy.scale.set(cell.sx, cell.sy, cell.sz);
+      dummy.updateMatrix();
+      rubble.setMatrixAt(cell.slot, dummy.matrix);
+      rubble.instanceMatrix.needsUpdate = true;
+    }
+    dummy.rotation.set(0, 0, 0);
+    if (changed) {
+      countRender("rubbleUpdates");
+      renderClock.markSceneDirty();
+    }
+  }, [occupied, sub, dummy]);
 
   useFrame(() => {
     if (done.current || born.current === 0) return;
@@ -271,7 +333,10 @@ function GroundBlocks({
         if (!rubble) continue;
         const t = t0 - cell.delay;
         dummy.rotation.set(0, cell.ry, 0);
-        if (t < 0) {
+        if (cell.hidden) {
+          dummy.position.set(cell.x, cell.y, cell.z);
+          dummy.scale.set(0.0001, 0.0001, 0.0001);
+        } else if (t < 0) {
           remaining = true;
           dummy.position.set(cell.x, cell.y + DROP, cell.z);
           dummy.scale.set(0.04, 0.04, 0.04);
@@ -293,7 +358,10 @@ function GroundBlocks({
       // eslint-disable-next-line react-hooks/immutability
       for (const rubble of rubbleRefs.current) if (rubble) rubble.instanceMatrix.needsUpdate = true;
     }
-    if (!remaining) done.current = true;
+    if (!remaining) {
+      done.current = true;
+      renderClock.markSceneDirty();
+    } else renderClock.animating();
   });
 
   return (
@@ -333,9 +401,9 @@ function GroundBlocks({
       )}
     </group>
   );
-}
+});
 
-function Platform({
+const Platform = memo(function Platform({
   rect,
   level,
   material,
@@ -344,6 +412,7 @@ function Platform({
   origin,
   cellMaterial,
   cellBottom,
+  occupied,
 }: {
   rect: LotRect;
   level: number;
@@ -353,12 +422,13 @@ function Platform({
   origin: number;
   cellMaterial?: (col: number, row: number) => PlatformMaterial | undefined;
   cellBottom?: (col: number, row: number) => number;
+  occupied?: Set<string>;
 }) {
   const top = level * ELEV + lift + (inset ? 0.06 : 0);
   const height = inset ? 0.06 : top + PLINTH_DEPTH;
   const bottom = top - height;
-  return <GroundBlocks rect={rect} top={top} bottom={bottom} material={material} origin={origin} cellMaterial={cellMaterial} cellBottom={inset ? undefined : cellBottom} />;
-}
+  return <GroundBlocks rect={rect} top={top} bottom={bottom} material={material} origin={origin} cellMaterial={cellMaterial} cellBottom={inset ? undefined : cellBottom} occupied={occupied} />;
+});
 
 /** Wall bricks: one ground block wide, half a block tall, a hand thick. */
 const WALL_BRICK_H = 0.5;
@@ -369,7 +439,7 @@ const WALL_BRICK_T = 0.4;
  * palette as the material it is built from, so a room reads as the
  * foundation carried upward instead of a plaster sheet set on top of it.
  */
-function WallBlocks({ wall, material }: { wall: WallSpec; material: PlatformMaterial }) {
+const WallBlocks = memo(function WallBlocks({ wall, material }: { wall: WallSpec; material: PlatformMaterial }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const dummy = useMemo(() => new THREE.Object3D(), []);
   const sub = GROUND_SUB;
@@ -416,6 +486,7 @@ function WallBlocks({ wall, material }: { wall: WallSpec; material: PlatformMate
     mesh.count = i;
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    renderClock.markSceneDirty();
   }, [wall, material, solid, rows, sub, size, horizontal, edgeOffset, salt, dummy]);
 
   return (
@@ -424,7 +495,7 @@ function WallBlocks({ wall, material }: { wall: WallSpec; material: PlatformMate
       <meshStandardMaterial roughness={0.86} metalness={0.02} envMapIntensity={0.25} />
     </instancedMesh>
   );
-}
+});
 
 function Wall({ wall }: { wall: WallSpec }) {
   if (wall.material) return <WallBlocks wall={wall} material={wall.material} />;
@@ -505,14 +576,20 @@ type PathCellSpec = { col: number; row: number; y: number };
 /** Every walk cell in the scene as ONE instanced mesh — shared geometry,
  * shared material, per-instance color — instead of a mesh + material per
  * cell. Rides the same foundation wave as the ground bricks. */
-function PathBlocks({ cells, origin, material }: { cells: PathCellSpec[]; origin: number; material?: PlatformMaterial }) {
+const PathBlocks = memo(function PathBlocks({ cells, origin, material }: { cells: PathCellSpec[]; origin: number; material?: PlatformMaterial }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const dummy = useMemo(() => new THREE.Object3D(), []);
   const born = useRef(0);
+  const originRef = useRef(origin);
   const done = useRef(false);
 
   useLayoutEffect(() => {
-    born.current = currentWave()?.born ?? performance.now();
+    if (born.current === 0) {
+      const first = cells[0];
+      const clock = waveFor(first ? { c0: first.col, r0: first.row } : { c0: 0, r0: 0 });
+      born.current = clock.born;
+      originRef.current = clock.origin;
+    }
     done.current = false;
     const mesh = meshRef.current;
     if (!mesh) return;
@@ -527,6 +604,7 @@ function PathBlocks({ cells, origin, material }: { cells: PathCellSpec[]; origin
     });
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    renderClock.animating();
   }, [cells, material, dummy]);
 
   useFrame(() => {
@@ -536,7 +614,7 @@ function PathBlocks({ cells, origin, material }: { cells: PathCellSpec[]; origin
     const t0 = (performance.now() - born.current) / 1000;
     let remaining = false;
     cells.forEach((c, i) => {
-      const t = t0 - dropDelay(c.col * GROUND_SUB, c.row * GROUND_SUB, origin);
+      const t = t0 - dropDelay(c.col * GROUND_SUB, c.row * GROUND_SUB, originRef.current);
       if (t < 0) {
         remaining = true;
         dummy.position.set(c.col * TILE, c.y + 0.02 + DROP, c.row * TILE);
@@ -553,7 +631,10 @@ function PathBlocks({ cells, origin, material }: { cells: PathCellSpec[]; origin
       mesh.setMatrixAt(i, dummy.matrix);
     });
     mesh.instanceMatrix.needsUpdate = true;
-    if (!remaining) done.current = true;
+    if (!remaining) {
+      done.current = true;
+      renderClock.markSceneDirty();
+    } else renderClock.animating();
   });
 
   return (
@@ -568,7 +649,7 @@ function PathBlocks({ cells, origin, material }: { cells: PathCellSpec[]; origin
       <meshStandardMaterial roughness={0.88} metalness={0.02} />
     </instancedMesh>
   );
-}
+});
 
 /** The wave restarts only when the architecture itself changes — module
  * state, like the wave clock in legoDrop, because it must be read and set
@@ -581,11 +662,15 @@ export const Environment3D = memo(function Environment3D({
   env,
   autoPads,
   surfaceYAt,
+  occupied,
 }: {
   env: EnvironmentSpec | null;
   autoPads: LotRect[];
   surfaceYAt: (col: number, row: number) => number;
+  /** Lots holding a piece — ground rubble on them is hidden. */
+  occupied?: Set<string>;
 }) {
+  countRender("environmentRenders");
   const origin = useMemo(() => {
     const rects: LotRect[] = [
       ...(env?.platforms.map((p) => p.rect) ?? []),
@@ -597,15 +682,23 @@ export const Environment3D = memo(function Environment3D({
 
   // Start the shared drop clock during render so pieces that mount in this
   // same pass (compose, share URL, reference scene) see the wave before paint.
-  const envId = env
+  // A scene is NEW when the ground it stood on is gone (compose, share URL,
+  // a fresh goal). Ground added onto a standing scene (extend_scene,
+  // create_zone) keeps the landed bricks where they are — only the new
+  // strips drop, on their own clock (see waveFor).
+  const groundIds = env
     ? `${env.platforms.map((p) => `${p.id}:${p.rect.c0}:${p.rect.r0}:${p.rect.w}x${p.rect.d}:${p.level}`).join("|")}/${env.water.map((w) => `${w.id}:${w.rect.c0}:${w.rect.r0}`).join("|")}`
     : "empty";
-  if (lastWaveKey !== envId) {
+  if (lastWaveKey !== groundIds) {
+    const prev = lastWaveKey ?? "";
+    const before = prev === "empty" || prev === "" ? null : new Set(prev.split("/")[0].split("|"));
+    const now = new Set(groundIds === "empty" ? [] : groundIds.split("/")[0].split("|"));
+    const grown = Boolean(before && before.size > 0 && [...before].every((id) => now.has(id)));
     // Deliberate render-time side effect: children mounting in this same
     // pass read the wave clock before paint — an effect fires too late.
     // eslint-disable-next-line react-hooks/globals
-    lastWaveKey = envId;
-    startFoundationWave(origin);
+    lastWaveKey = groundIds;
+    if (!grown) startFoundationWave(origin);
   }
 
   // Themed material patches: one lookup shared by every land platform strip.
@@ -642,7 +735,7 @@ export const Environment3D = memo(function Environment3D({
   const bottomFor = useMemo(() => {
     const all = (platformsRef ?? []).filter((p) => !p.inset);
     const topOf = (p: (typeof all)[number]) => p.level * ELEV + (p.lift ?? 0);
-    return (self: (typeof all)[number]) => (col: number, row: number) => {
+    const make = (self: (typeof all)[number]) => (col: number, row: number) => {
       let best = -PLINTH_DEPTH;
       for (const q of all) {
         if (q === self || q.level >= self.level) continue;
@@ -651,6 +744,10 @@ export const Environment3D = memo(function Environment3D({
       }
       return best;
     };
+    // One closure per platform, built up front: the prop stays referentially
+    // stable across renders, so a strip's layout effect does not re-run.
+    const fns = new Map(all.map((p) => [p, make(p)] as const));
+    return (self: (typeof all)[number]) => fns.get(self) ?? make(self);
   }, [platformsRef]);
 
   return (
@@ -666,10 +763,13 @@ export const Environment3D = memo(function Environment3D({
           origin={origin}
           cellMaterial={p.inset || p.level > 0 ? undefined : cellMaterial}
           cellBottom={p.level > 0 && !p.inset ? bottomFor(p) : undefined}
+          occupied={occupied}
         />
       ))}
-      {autoPads.map((pad, i) => (
-        <Platform key={`auto-${i}-${pad.c0}-${pad.r0}-${pad.w}x${pad.d}`} rect={pad} level={0} material="grass" origin={origin} />
+      {autoPads.map((pad) => (
+        // Keyed by rect alone: adding a piece elsewhere leaves this pad's
+        // landed bricks exactly where they are.
+        <Platform key={`auto-${pad.c0}-${pad.r0}-${pad.w}x${pad.d}`} rect={pad} level={0} material="grass" origin={origin} occupied={occupied} />
       ))}
       {env?.walls.map((w) => {
         const y = surfaceYAt(w.c, w.r);

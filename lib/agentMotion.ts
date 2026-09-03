@@ -81,6 +81,17 @@ export function kitPalettePoint(): { x: number; y: number } | null {
   return { x: r.left + 36, y: r.top + Math.min(80, r.height / 3) };
 }
 
+/** Wait until the kit palette is in the DOM and laid out (after setKitOpen). */
+export async function waitForKitPalette(gen: number): Promise<{ x: number; y: number }> {
+  for (let i = 0; i < 20; i += 1) {
+    if (!isMotionCurrent(gen)) break;
+    const pt = kitPalettePoint();
+    if (pt && pt.x > 0 && pt.y > 0) return pt;
+    await sleep(16, gen);
+  }
+  return kitPalettePoint() ?? { x: 160, y: window.innerHeight * 0.38 };
+}
+
 export function lotScreenPoint(lot: string): { x: number; y: number } | null {
   // The 3D stage registers a camera projector; the SVG CTM path below is the
   // legacy fallback for the 2D sprite stage.
@@ -105,7 +116,15 @@ export async function travelCursor(to: { x: number; y: number }, ms: number, gen
     store.setAgentCursor({ x: to.x, y: to.y, visible: true });
     return;
   }
-  const from = store.agentCursor ?? kitPalettePoint() ?? { x: 160, y: window.innerHeight * 0.38, visible: true };
+  const from =
+    store.agentCursor?.visible
+      ? { x: store.agentCursor.x, y: store.agentCursor.y }
+      : { x: window.innerWidth * 0.52, y: window.innerHeight * 0.48 };
+  // Skip a no-op hop — avoids a one-frame blink when already on target.
+  if (Math.hypot(to.x - from.x, to.y - from.y) < 4) {
+    store.setAgentCursor({ x: to.x, y: to.y, visible: true });
+    return;
+  }
   store.setAgentCursor({ x: from.x, y: from.y, visible: true });
   const start = performance.now();
   await new Promise<void>((resolve) => {

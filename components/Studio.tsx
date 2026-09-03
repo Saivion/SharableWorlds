@@ -17,7 +17,7 @@ import { Notch } from "./Notch";
 import { HoverTipHost } from "./HoverTip";
 import { AgentCursor } from "./AgentCursor";
 import { GooeyRail, RailDivider, RailSection, railHotHandlers } from "./GooeyRail";
-import { HandIcon, KitIcon, SelectIcon, UndoIcon } from "./icons";
+import { HandIcon, KitIcon, OrbitIcon, SelectIcon, UndoIcon } from "./icons";
 
 export function Studio() {
   const webmcp = useTown((s) => s.webmcp);
@@ -29,8 +29,10 @@ export function Studio() {
   const setKitOpen = useTown((s) => s.setKitOpen);
   const nudgeGoal = useTown((s) => s.nudgeGoal);
   const nudgeToken = useTown((s) => s.nudgeToken);
+  const nudgeMode = useTown((s) => s.nudgeMode);
   const undo = useTown((s) => s.undo);
   const undoDepth = useTown((s) => s.undoStack.length);
+  const agentBusy = useTown((s) => s.agentBusy);
   const [retry, setRetry] = useState(0);
   const [hotId, setHotId] = useState<string | null>(null);
   const hot = railHotHandlers();
@@ -55,8 +57,8 @@ export function Studio() {
   // when no WebMCP host is attached to act on the goal.
   useEffect(() => {
     if (nudgeToken === 0 || !nudgeGoal) return;
-    void runGoalBuild(nudgeGoal);
-  }, [nudgeToken, nudgeGoal]);
+    void runGoalBuild(nudgeGoal, nudgeMode);
+  }, [nudgeToken, nudgeGoal, nudgeMode]);
 
   // Boot: a share URL (?scene=…&seed=…) reconstructs that base world through
   // the same lifecycle an agent runs — the seed is sufficient, no
@@ -64,7 +66,11 @@ export function Studio() {
   useEffect(() => {
     const shared = parseShareParams(window.location.search);
     if (shared) {
-      void callTownTool("build_scene", { theme: shared.prompt, seed: shared.seed }, "ui");
+      // The base world first, then every addition it was grown with, in order.
+      void (async () => {
+        await callTownTool("build_scene", { theme: shared.prompt, seed: shared.seed }, "ui");
+        for (const add of shared.additions) await callTownTool("extend_scene", { prompt: add }, "ui");
+      })();
     }
   }, []);
 
@@ -108,6 +114,7 @@ export function Studio() {
   return (
     <main
       className="studio"
+      data-agent-busy={agentBusy || undefined}
       style={{ "--agent-accent": AGENT_ACCENT } as CSSProperties}
     >
       <Stage3D />
@@ -121,6 +128,9 @@ export function Studio() {
           ))}
           {toolBtn("hand", "Hand — Pan", (p) => (
             <HandIcon {...p} />
+          ))}
+          {toolBtn("orbit", "Rotate — Spin the World", (p) => (
+            <OrbitIcon {...p} />
           ))}
         </RailSection>
         <RailDivider />
@@ -171,7 +181,6 @@ export function Studio() {
       <AboutDialog open={aboutOpen} closing={aboutClosing} onClose={closeAbout} />
       <Inspector />
       <KitPalette open={kitOpen} />
-      <AgentCursor />
 
       <footer className="studio-meta">
         {webmcp === "missing" ? (
@@ -196,10 +205,14 @@ export function Studio() {
 
       <EmptyWelcome quiet={!aboutReady || aboutOpen || aboutClosing} />
       <div className="studio-hint">
-        Select to drag objects · F to flip toward each other · pick a piece, click anywhere · Space + drag to pan · scroll to zoom
+        Select to drag objects · F to flip toward each other · pick a piece, click anywhere · Space + drag to pan · R or right-drag to rotate · scroll to zoom
       </div>
       <SeedChip />
       <HoverTipHost />
+      {/* Fixed overlay above kit/rails — must stay last in the studio tree. */}
+      <div className="agent-cursor-layer">
+        <AgentCursor />
+      </div>
     </main>
   );
 }
